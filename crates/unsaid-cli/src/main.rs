@@ -728,3 +728,28 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::printable;
+
+    #[test]
+    fn terminal_control_is_removed_from_server_text() {
+        assert_eq!(printable("plain text, caf\u{e9}"), "plain text, caf\u{e9}");
+        for hostile in [
+            "\u{1b}]52;c;ZXZpbA==\u{7}",
+            "\u{1b}[2J",
+            "\u{9b}2J",
+            "\u{202e}gnp.exe",
+            "\u{2066}x",
+            "line\nbreak\r",
+        ] {
+            let safe = printable(hostile);
+            assert!(!safe.chars().any(char::is_control), "{hostile:?}");
+            assert!(
+                !safe.contains('\u{202e}') && !safe.contains('\u{2066}'),
+                "{hostile:?}"
+            );
+        }
+    }
+}

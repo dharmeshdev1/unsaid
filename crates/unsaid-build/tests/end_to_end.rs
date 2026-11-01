@@ -430,6 +430,45 @@ fn hostile_but_consistent_manifests_are_refused() {
     fs::remove_dir_all(&b.dir).unwrap();
 }
 
+/// A small page can expand to over a million empty documents, so a layout may not promise more
+/// documents than the page has bytes, even if everything else about it is consistent.
+#[test]
+fn a_page_may_not_hold_more_documents_than_bytes() {
+    let mut options = small_options();
+    options.page_bytes = Some(512);
+    let b = build_corpus("crowded", 2000, options);
+    let manifest = Manifest::parse(&read(&b.dir, "manifest.json")).unwrap();
+    let (clusters, cols) = (manifest.clusters, manifest.payload.cols);
+    assert!(
+        2000 - cols + 1 > manifest.payload.rows,
+        "the test needs a crowded first page"
+    );
+
+    let mut layout = read(&b.dir, "layout.bin");
+    for page in 1..cols {
+        let first = (2000 - cols + page) as u32;
+        layout[(clusters + page) * 4..(clusters + page + 1) * 4]
+            .copy_from_slice(&first.to_le_bytes());
+    }
+    let mut hostile = manifest.clone();
+    hostile.blobs.get_mut("layout").unwrap().sha256 = unsaid_core::manifest::sha256_hex(&layout);
+    let result = Index::open(
+        &serde_json::to_vec(&hostile).unwrap(),
+        &IndexFiles {
+            routing: &read(&b.dir, "routing.bin"),
+            layout: &layout,
+            page_digests: &read(&b.dir, "page_digests.bin"),
+            rank_hint: &read(&b.dir, "rank.hint"),
+            payload_hint: &read(&b.dir, "payload.hint"),
+        },
+    );
+    let Err(error) = result else {
+        panic!("a crowded page was accepted");
+    };
+    assert!(error.to_string().contains("more documents"), "{error}");
+    fs::remove_dir_all(&b.dir).unwrap();
+}
+
 /// A server returning garbage can only damage results. It cannot crash the client, and the
 /// client's traffic does not change in response.
 #[test]

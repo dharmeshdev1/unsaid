@@ -526,6 +526,32 @@ mod tests {
         assert!(error.contains("more than"), "{error}");
     }
 
+    /// A connection left open would close later, after the results were processed, and the server
+    /// could time that. So the close must come when the answer is read, not when the agent goes.
+    #[test]
+    fn a_connection_closes_as_soon_as_its_answer_is_read() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (closed, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(&http_response("200 OK", "", b"12345678"))
+                .unwrap();
+            // A read of nothing means that the client has closed its end.
+            let _ = stream.read(&mut buffer);
+            closed.send(()).unwrap();
+        });
+        let client = agent();
+        assert_eq!(get(&client, &url, 8).unwrap(), b"12345678");
+        // The agent is still alive here, and would be keeping an idle connection open.
+        seen.recv_timeout(Duration::from_secs(5))
+            .expect("the connection stayed open after its answer was read");
+        drop(client);
+    }
+
     /// A redirect could send a query anywhere, and turn a POST into a GET.
     #[test]
     fn a_redirect_is_not_followed() {
