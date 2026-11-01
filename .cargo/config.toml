@@ -1,0 +1,11 @@
+# The matrix-vector product is the hot loop of the whole system and it relies on the
+# compiler vectorising integer multiplies. x86-64 only gains a 32-bit vector multiply
+# with SSE4.1, so x86 builds target the AVX2 baseline. aarch64 has NEON by default.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

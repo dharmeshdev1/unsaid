@@ -1,0 +1,11 @@
+/target
+*.swp
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+/data/
+/index/
+/dist/
+*.log
+web/pkg/
