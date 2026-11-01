@@ -526,7 +526,7 @@ fn run_demo(args: &DemoArgs) -> Result<(), String> {
         args.model.replace('/', "_")
     ));
     if !dir.join("manifest.json").is_file() {
-        eprintln!("First run: indexing 1,000 sample articles, which takes about a minute.");
+        eprintln!("First run: indexing 1,000 sample articles, which takes under a minute.");
         let source = models::cache_dir().join("demo-sample.jsonl");
         std::fs::create_dir_all(models::cache_dir()).map_err(|e| e.to_string())?;
         std::fs::write(&source, SAMPLE_CORPUS).map_err(|e| e.to_string())?;

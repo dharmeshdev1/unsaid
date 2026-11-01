@@ -46,6 +46,9 @@ def main():
         page.wait_for_selector("body[data-state=ready]", timeout=180_000)
         print("ready:", page.inner_text("#status"))
         shot(page, "2-ready")
+        page.wait_for_selector("body[data-prepare-ms]", state="attached", timeout=60_000)
+        print("encryption prepared ahead for one search, ms:", page.get_attribute("body", "data-prepare-ms"))
+        page.wait_for_timeout(4000)
 
         results = []
         for query in QUERIES + [SECRET]:

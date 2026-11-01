@@ -18,7 +18,7 @@ A search engine that cannot see what you search for. Your question is encrypted 
 with lattice cryptography, and the server finds relevant documents and returns them **without
 learning the question or the results**.
 
-This is not a promise to delete logs. The server has nothing to log.
+This is not a promise to delete logs. Your question never reaches the server in a form it could log.
 
 ```text
 What an ordinary search engine can write in its log:
@@ -42,7 +42,7 @@ Download a binary from [Releases](https://github.com/dharmeshdev1/unsaid/release
 cargo install --git https://github.com/dharmeshdev1/unsaid unsaid
 ```
 
-Then run the demo, which indexes 1,000 sample articles and serves a private search page. With `--watch`,
+Then run the demo, which indexes 1,000 sample articles in under a minute and serves a private search page. With `--watch`,
 the server prints each query as it arrives, so you can see for yourself how little there is in it. These
 are two searches for very different things:
 
@@ -51,10 +51,10 @@ $ unsaid demo --watch
 Private search at http://127.0.0.1:8377
 Printing every query exactly as it arrives:
 
-127.0.0.1  POST /v1/rank      81920 bytes  0de695f256ca9792b98948437c71fdf0...  answered in 1 ms
-127.0.0.1  POST /v1/fetch      2464 bytes  e30fa2e7ec458d7c59acfc3a9cd0c8f5...  answered in 2 ms
-127.0.0.1  POST /v1/rank      81920 bytes  f901d7190a2f9a4d4c4541d65073fa33...  answered in 1 ms
-127.0.0.1  POST /v1/fetch      2464 bytes  4f29492f0044da105d628628f0e2b580...  answered in 2 ms
+127.0.0.1  POST /v1/rank      81920 bytes  dbbf7740265d8a4906dd8945f91d1746...  answered in 1 ms
+127.0.0.1  POST /v1/fetch      2464 bytes  79bf87540d72d77b56f0b885d77c163f...  answered in 0 ms
+127.0.0.1  POST /v1/rank      81920 bytes  06d0d963867d2f32fd908fbe0afe34b1...  answered in 1 ms
+127.0.0.1  POST /v1/fetch      2464 bytes  125f6f175f59475da849a3772edf89d5...  answered in 0 ms
 ```
 
 ## Search your own documents
@@ -66,14 +66,13 @@ unsaid build ./my-notes --out my-index
 unsaid serve my-index
 ```
 
-```sh
-unsaid search "what did we decide about the merger" --trace
-```
-
 ```text
-1. Board minutes, March  (0.61)
-   ...
-sent 214 KB and received 72 KB. embed 16 ms, encrypt 40 ms, ranking 2 ms, pages 2 ms, decrypt 6 ms
+$ unsaid search "early signs of dementia" -k 1 --trace
+1. Alzheimer's disease  (0.46)
+   Alzheimer's Disease (AD) is a brain disease that slowly destroys brain cells. ...
+   https://simple.wikipedia.org/wiki/Alzheimer%27s%20disease
+
+sent 82 KB and received 36 KB. embed 5 ms, encrypt 14 ms, ranking 2 ms, pages 1 ms, decrypt 5.7 ms, held for timing 245 ms, total 272 ms
 ```
 
 The index, and the server that holds it, can sit on any machine you do not fully trust.
@@ -104,7 +103,26 @@ answers with a local model, so nothing reads the question except your own comput
 ## How well it works
 
 Everything below goes through the real protocol with real encryption. Nothing is simulated.
-BENCHMARK_SUMMARY
+
+**Quality.** Compared with exact search using the same embedding model, on the [BEIR](https://github.com/beir-cellar/beir) benchmark:
+
+| Dataset | Documents | Exact nDCG@10 | Unsaid nDCG@10 | Share of exact |
+| --- | --- | --- | --- | --- |
+| SciFact | 5,183 | 0.6230 | 0.5969 | 95.8% |
+| ArguAna | 8,674 | 0.4995 | 0.4910 | 98.3% |
+| FiQA | 57,638 | 0.3662 | 0.3309 | 90.3% |
+| NQ | 2,681,468 | 0.3911 | 0.3745 | 95.8% |
+
+**Speed.** On an Apple M5 laptop with client and server on one machine, so with no network time:
+
+| Corpus | Documents | Download once | Per search | Server memory | Server time, 10 cores | Server time, 1 core | Whole search |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Wikipedia sample | 20,000 | 37 MB | 441 KB up, 48 KB down | 62 MB | 6 ms | 11 ms | 0.34 s |
+| Simple English Wikipedia | 346,616 | 50 MB | 2.3 MB up, 96 KB down | 350 MB | 32 ms | 82 ms | 0.60 s |
+| BEIR NQ | 2,681,468 | 98 MB | 5.1 MB up, 320 KB down | 1.9 GB | 99 ms | 405 ms | 1.1 s |
+
+A whole search includes a 250 ms hold that hides timing from the server, and the upload is the real cost
+on a slow connection. One core serves about 12 searches a second over all of Simple English Wikipedia.
 
 [Full results and the commands to reproduce them.](docs/benchmarks.md)
 
