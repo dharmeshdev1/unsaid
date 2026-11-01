@@ -145,7 +145,7 @@ class Pattern {
 /** The static demo site marks itself. Otherwise this page came from a real server. */
 async function locate() {
   const demo = document.body.dataset.source === "demo";
-  const response = await fetch(demo ? "demo/manifest.json" : "v1/manifest");
+  const response = await fetch(demo ? "demo/manifest.json" : "v1/manifest", { redirect: "error" });
   if (!response.ok) throw new Error("no search index is available on this page");
   const manifest = await response.text();
   return { live: !demo, manifest, parsed: JSON.parse(manifest) };
@@ -163,6 +163,7 @@ function createTransport(source, server) {
     const started = performance.now();
     const response = await fetch(path, {
       method: "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/octet-stream" },
       body: request,
     });
@@ -424,6 +425,7 @@ async function start() {
     if (!source.live) {
       server = new Peer(onProgress);
       loading.push(server.call("loadServer", {
+        manifest: source.manifest,
         rank: {
           url: "demo/rank.matrix",
           key: `matrix/${blobs.rank_hint.sha256}`,

@@ -155,7 +155,8 @@ fn paginate(docs: &[Document], size: usize) -> Vec<(Vec<u8>, usize)> {
         let mut doc = doc.clone();
         current.push(doc.clone());
         let refs: Vec<&Document> = current.iter().collect();
-        if pages::encode(&refs, size).is_some() {
+        // Clients refuse a page with more documents than bytes. Only duplicates could get there.
+        if current.len() <= size && pages::encode(&refs, size).is_some() {
             continue;
         }
         current.pop();

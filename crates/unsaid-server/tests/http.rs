@@ -127,6 +127,43 @@ async fn bad_requests_are_refused() {
     );
 }
 
+fn stalled_body() -> Body {
+    Body::from_stream(futures_util::stream::pending::<
+        Result<Vec<u8>, std::io::Error>,
+    >())
+}
+
+/// Memory is taken only for bytes that arrive, so connections that send nothing cost nothing.
+#[tokio::test]
+async fn idle_uploads_do_not_lock_out_other_queries() {
+    let f = fixture("idle");
+    let width = f.manifest.rank.cols * 4;
+    let mut idle = Vec::new();
+    for _ in 0..200 {
+        let request = Request::post("/v1/rank")
+            .header(header::CONTENT_LENGTH, width * MAX_QUERIES_PER_REQUEST)
+            .body(stalled_body())
+            .unwrap();
+        let app = f.app.clone();
+        idle.push(tokio::spawn(app.oneshot(request)));
+    }
+    tokio::task::yield_now().await;
+    let response = send(&f, "/v1/rank", vec![7u8; width]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    idle.iter().for_each(tokio::task::JoinHandle::abort);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_upload_is_dropped() {
+    let f = fixture("stall");
+    let request = Request::post("/v1/rank")
+        .header(header::CONTENT_LENGTH, f.manifest.rank.cols * 4)
+        .body(stalled_body())
+        .unwrap();
+    let response = f.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+}
+
 #[tokio::test]
 async fn public_files_are_served_by_hash_and_nothing_else_exists() {
     let f = fixture("public");

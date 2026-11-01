@@ -2,7 +2,7 @@
 // worker, so on the demo page the two sides share no memory: everything between them is a
 // message holding the same bytes a network would carry.
 
-import init, { Engine, LocalServer } from "./pkg/unsaid_wasm.js";
+import init, { Engine, LocalServer, check_manifest } from "./pkg/unsaid_wasm.js";
 
 const CACHE = "unsaid-v1";
 let engine = null;
@@ -31,7 +31,7 @@ async function download(url, key, size, report) {
     report(bytes.length);
     return bytes;
   }
-  const response = await fetch(url);
+  const response = await fetch(url, { redirect: "error" });
   if (!response.ok) throw new Error(`${url} answered ${response.status}`);
   const bytes = new Uint8Array(size);
   const reader = response.body.getReader();
@@ -57,6 +57,8 @@ const handlers = {
   /** Fetch the public files and verify them. `files` maps each blob to its URL. */
   async loadClient({ manifest, files, allowUnknownModel }, id) {
     await wasm();
+    const text = new TextEncoder().encode(manifest);
+    check_manifest(text);
     const report = progress(id);
     const names = ["routing", "layout", "page_digests", "rank_hint", "payload_hint", "model"];
     const parts = await Promise.all(
@@ -65,7 +67,6 @@ const handlers = {
         return download(url, `blob/${sha256}`, bytes, report);
       }),
     );
-    const text = new TextEncoder().encode(manifest);
     try {
       engine = new Engine(text, ...parts, allowUnknownModel);
     } catch (error) {
@@ -82,8 +83,9 @@ const handlers = {
   },
 
   /** Fetch the matrices a real server would hold. Only the demo page does this. */
-  async loadServer({ rank, payload }, id) {
+  async loadServer({ manifest, rank, payload }, id) {
     await wasm();
+    check_manifest(new TextEncoder().encode(manifest));
     const report = progress(id);
     const [rankBytes, payloadBytes] = await Promise.all([
       download(rank.url, rank.key, rank.rows * rank.cols, report),
@@ -114,14 +116,16 @@ const handlers = {
     const t0 = performance.now();
     engine.decrypt_rank(answer);
     const decrypting = performance.now() - t0;
-    const request = engine.choose_pages(limit);
+    engine.pick_pages(limit);
     const decryptMs = performance.now() - t0;
-    // Ranking takes a time that depends on the results, and the next request is the one thing a
-    // server can time. It is tiny next to the decryption, which never varies, so leaving at twice
-    // that hides it.
+    // Picking pages takes a time that depends on the results, and the next request is the one thing
+    // a server can time. It is tiny next to the decryption, which never varies, so waiting until
+    // twice that hides it. Sealing the request also takes a fixed time, so it can come after.
     const held = Math.max(0, 2 * decrypting - decryptMs);
     if (held > 0) await new Promise((resolve) => setTimeout(resolve, held));
-    return { request, decryptMs, heldMs: performance.now() - t0 - decryptMs };
+    const heldMs = performance.now() - t0 - decryptMs;
+    const request = engine.seal_pages();
+    return { request, decryptMs, heldMs };
   },
 
   abort() {

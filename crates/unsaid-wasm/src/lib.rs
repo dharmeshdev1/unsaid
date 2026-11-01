@@ -7,14 +7,22 @@
 use std::collections::VecDeque;
 
 use unsaid_core::Index;
-use unsaid_core::client::{FetchStage, IndexFiles, RankStage, ScoredStage, SearchPlan};
-use unsaid_core::manifest::sha256_hex;
+use unsaid_core::client::{
+    FetchStage, IndexFiles, PickedStage, RankStage, ScoredStage, SearchPlan,
+};
+use unsaid_core::manifest::{Manifest, sha256_hex};
 use unsaid_embed::{Embedder, is_known_model};
 use unsaid_lwe::{Matrix, Prepared};
 use wasm_bindgen::prelude::*;
 
 fn fail(error: impl std::fmt::Display) -> JsError {
     JsError::new(&error.to_string())
+}
+
+/// Refuse a bad manifest before anything sized by it is allocated or downloaded.
+#[wasm_bindgen]
+pub fn check_manifest(manifest: &[u8]) -> Result<(), JsError> {
+    Manifest::parse(manifest).map(|_| ()).map_err(fail)
 }
 
 /// A connected search client.
@@ -27,6 +35,7 @@ pub struct Engine {
     fetch_tokens: VecDeque<Prepared>,
     rank_stage: Option<RankStage>,
     scored_stage: Option<ScoredStage>,
+    picked_stage: Option<PickedStage>,
     fetch_stage: Option<FetchStage>,
 }
 
@@ -77,6 +86,7 @@ impl Engine {
             fetch_tokens: VecDeque::new(),
             rank_stage: None,
             scored_stage: None,
+            picked_stage: None,
             fetch_stage: None,
         })
     }
@@ -133,7 +143,7 @@ impl Engine {
     }
 
     /// Decrypt the scores. This takes the same time for every search, so its duration can be used
-    /// to hide how long `choose_pages` takes.
+    /// to hide how long `pick_pages` takes.
     pub fn decrypt_rank(&mut self, answer: &[u8]) -> Result<(), JsError> {
         let stage = self
             .rank_stage
@@ -143,14 +153,24 @@ impl Engine {
         Ok(())
     }
 
-    /// Choose the pages to fetch. Returns the bytes to send to the document endpoint.
-    pub fn choose_pages(&mut self, limit: usize) -> Result<Vec<u8>, JsError> {
+    /// Choose the pages to fetch. How long this takes depends on the results.
+    pub fn pick_pages(&mut self, limit: usize) -> Result<(), JsError> {
         let stage = self
             .scored_stage
             .take()
             .ok_or_else(|| JsError::new("no search in progress"))?;
+        self.picked_stage = Some(stage.pick(&self.index, self.plan.pages, limit));
+        Ok(())
+    }
+
+    /// Returns the bytes to send to the document endpoint.
+    pub fn seal_pages(&mut self) -> Result<Vec<u8>, JsError> {
+        let stage = self
+            .picked_stage
+            .take()
+            .ok_or_else(|| JsError::new("no search in progress"))?;
         let tokens: Vec<Prepared> = self.fetch_tokens.drain(..self.plan.pages).collect();
-        let (stage, request) = stage.choose(&self.index, tokens, limit).map_err(fail)?;
+        let (stage, request) = stage.seal(&self.index, tokens).map_err(fail)?;
         self.fetch_stage = Some(stage);
         Ok(request)
     }
@@ -169,6 +189,7 @@ impl Engine {
     pub fn abort(&mut self) {
         self.rank_stage = None;
         self.scored_stage = None;
+        self.picked_stage = None;
         self.fetch_stage = None;
     }
 

@@ -182,12 +182,51 @@ export class Engine {
         wasm.__wbg_engine_free(ptr, 0);
     }
     /**
+     * Choose the pages to fetch. How long this takes depends on the results.
+     * @param {number} limit
+     */
+    pick_pages(limit) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.engine_pick_pages(retptr, this.__wbg_ptr, limit);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Pages retrieved per search.
      * @returns {number}
      */
     plan_pages() {
         const ret = wasm.engine_plan_pages(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Returns the bytes to send to the document endpoint.
+     * @returns {Uint8Array}
+     */
+    seal_pages() {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.engine_seal_pages(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v1 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export3(r0, r1 * 1, 1);
+            return v1;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Clusters scored per search.
@@ -214,37 +253,14 @@ export class Engine {
         }
     }
     /**
-     * Choose the pages to fetch. Returns the bytes to send to the document endpoint.
-     * @param {number} limit
-     * @returns {Uint8Array}
-     */
-    choose_pages(limit) {
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.engine_choose_pages(retptr, this.__wbg_ptr, limit);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-            if (r3) {
-                throw takeObject(r2);
-            }
-            var v1 = getArrayU8FromWasm0(r0, r1).slice();
-            wasm.__wbindgen_export2(r0, r1 * 1, 1);
-            return v1;
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-        }
-    }
-    /**
      * Decrypt the scores. This takes the same time for every search, so its duration can be used
-     * to hide how long `choose_pages` takes.
+     * to hide how long `pick_pages` takes.
      * @param {Uint8Array} answer
      */
     decrypt_rank(answer) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(answer, wasm.__wbindgen_export3);
+            const ptr0 = passArray8ToWasm0(answer, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.engine_decrypt_rank(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -266,7 +282,7 @@ export class Engine {
         let deferred3_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(answer, wasm.__wbindgen_export3);
+            const ptr0 = passArray8ToWasm0(answer, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.engine_receive_pages(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -284,7 +300,7 @@ export class Engine {
             return getStringFromWasm0(ptr2, len2);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export2(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_export3(deferred3_0, deferred3_1, 1);
         }
     }
     /**
@@ -311,19 +327,19 @@ export class Engine {
     constructor(manifest, routing, layout, page_digests, rank_hint, payload_hint, model, allow_unknown_model) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(manifest, wasm.__wbindgen_export3);
+            const ptr0 = passArray8ToWasm0(manifest, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passArray8ToWasm0(routing, wasm.__wbindgen_export3);
+            const ptr1 = passArray8ToWasm0(routing, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
-            const ptr2 = passArray8ToWasm0(layout, wasm.__wbindgen_export3);
+            const ptr2 = passArray8ToWasm0(layout, wasm.__wbindgen_export2);
             const len2 = WASM_VECTOR_LEN;
-            const ptr3 = passArray8ToWasm0(page_digests, wasm.__wbindgen_export3);
+            const ptr3 = passArray8ToWasm0(page_digests, wasm.__wbindgen_export2);
             const len3 = WASM_VECTOR_LEN;
-            const ptr4 = passArray8ToWasm0(rank_hint, wasm.__wbindgen_export3);
+            const ptr4 = passArray8ToWasm0(rank_hint, wasm.__wbindgen_export2);
             const len4 = WASM_VECTOR_LEN;
-            const ptr5 = passArray8ToWasm0(payload_hint, wasm.__wbindgen_export3);
+            const ptr5 = passArray8ToWasm0(payload_hint, wasm.__wbindgen_export2);
             const len5 = WASM_VECTOR_LEN;
-            const ptr6 = passArray8ToWasm0(model, wasm.__wbindgen_export3);
+            const ptr6 = passArray8ToWasm0(model, wasm.__wbindgen_export2);
             const len6 = WASM_VECTOR_LEN;
             wasm.engine_new(retptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, allow_unknown_model);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -356,7 +372,7 @@ export class Engine {
             return getStringFromWasm0(r0, r1);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export2(deferred1_0, deferred1_1, 1);
+            wasm.__wbindgen_export3(deferred1_0, deferred1_1, 1);
         }
     }
     /**
@@ -373,7 +389,7 @@ export class Engine {
     begin(embedding) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArrayF32ToWasm0(embedding, wasm.__wbindgen_export3);
+            const ptr0 = passArrayF32ToWasm0(embedding, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.engine_begin(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -384,7 +400,7 @@ export class Engine {
                 throw takeObject(r2);
             }
             var v2 = getArrayU8FromWasm0(r0, r1).slice();
-            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+            wasm.__wbindgen_export3(r0, r1 * 1, 1);
             return v2;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
@@ -398,13 +414,13 @@ export class Engine {
     embed(query) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(query, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+            const ptr0 = passStringToWasm0(query, wasm.__wbindgen_export2, wasm.__wbindgen_export4);
             const len0 = WASM_VECTOR_LEN;
             wasm.engine_embed(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var v2 = getArrayF32FromWasm0(r0, r1).slice();
-            wasm.__wbindgen_export2(r0, r1 * 4, 4);
+            wasm.__wbindgen_export3(r0, r1 * 4, 4);
             return v2;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
@@ -427,7 +443,7 @@ export class Engine {
             return getStringFromWasm0(r0, r1);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export2(deferred1_0, deferred1_1, 1);
+            wasm.__wbindgen_export3(deferred1_0, deferred1_1, 1);
         }
     }
     /**
@@ -467,9 +483,9 @@ export class LocalServer {
     constructor(rank_rows, rank_cols, rank, payload_rows, payload_cols, payload) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(rank, wasm.__wbindgen_export3);
+            const ptr0 = passArray8ToWasm0(rank, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passArray8ToWasm0(payload, wasm.__wbindgen_export3);
+            const ptr1 = passArray8ToWasm0(payload, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
             wasm.localserver_new(retptr, rank_rows, rank_cols, ptr0, len0, payload_rows, payload_cols, ptr1, len1);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -493,7 +509,7 @@ export class LocalServer {
     rank(request) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export3);
+            const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.localserver_rank(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -504,7 +520,7 @@ export class LocalServer {
                 throw takeObject(r2);
             }
             var v2 = getArrayU8FromWasm0(r0, r1).slice();
-            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+            wasm.__wbindgen_export3(r0, r1 * 1, 1);
             return v2;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
@@ -518,7 +534,7 @@ export class LocalServer {
     fetch(request) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export3);
+            const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.localserver_fetch(retptr, this.__wbg_ptr, ptr0, len0);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
@@ -529,7 +545,7 @@ export class LocalServer {
                 throw takeObject(r2);
             }
             var v2 = getArrayU8FromWasm0(r0, r1).slice();
-            wasm.__wbindgen_export2(r0, r1 * 1, 1);
+            wasm.__wbindgen_export3(r0, r1 * 1, 1);
             return v2;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
@@ -537,6 +553,26 @@ export class LocalServer {
     }
 }
 if (Symbol.dispose) LocalServer.prototype[Symbol.dispose] = LocalServer.prototype.free;
+
+/**
+ * Refuse a bad manifest before anything sized by it is allocated or downloaded.
+ * @param {Uint8Array} manifest
+ */
+export function check_manifest(manifest) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(manifest, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.check_manifest(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        if (r1) {
+            throw takeObject(r0);
+        }
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
 
 const EXPECTED_RESPONSE_TYPES = new Set(['basic', 'cors', 'default']);
 

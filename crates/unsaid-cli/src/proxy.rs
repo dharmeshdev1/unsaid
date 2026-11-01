@@ -58,9 +58,7 @@ async fn local_only(State(address): State<String>, request: Request, next: Next)
 async fn run_search(gateway: Gateway, request: SearchRequest) -> (StatusCode, Json<Value>) {
     let limit = request.limit.clamp(1, 100);
     let result = tokio::task::spawn_blocking(move || {
-        gateway
-            .engine
-            .search(&request.query, limit, gateway.plan, false)
+        gateway.engine.search(&request.query, limit, gateway.plan)
     })
     .await;
     match result {

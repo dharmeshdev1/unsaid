@@ -28,11 +28,13 @@ pub const MAX_QUERY_WORDS: u64 = 1 << 26;
 /// Longest model vector a client will accept.
 pub const MAX_MODEL_DIM: usize = 1 << 13;
 /// Most routing prototypes a client will accept.
-pub const MAX_PROTOTYPES: usize = 1 << 24;
+pub const MAX_PROTOTYPES: usize = 1 << 20;
 /// Largest model file a client will accept.
 pub const MAX_MODEL_BYTES: u64 = 1 << 31;
 /// Most a client will download, once, for one index.
 pub const MAX_PUBLIC_BYTES: u64 = 1 << 33;
+/// Longest manifest a client will read.
+pub const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 /// Longest name a client will accept.
 const MAX_NAME_BYTES: usize = 1 << 10;
 /// Quantisation scales outside this range have no use and only make results meaningless.
@@ -543,6 +545,32 @@ pub(crate) mod tests {
             let mut m = sample();
             change(&mut m);
             assert!(m.validate().is_err());
+        }
+    }
+
+    /// Sizes that are too large must be refused for that reason alone, even when every file size
+    /// is consistent with them.
+    #[test]
+    fn shapes_over_the_limits_are_rejected_when_otherwise_consistent() {
+        let changes: [fn(&mut Manifest); 3] = [
+            |m| m.rank.rows = MAX_ROWS + 1,
+            |m| m.payload.rows = MAX_ROWS + 1,
+            |m| {
+                m.payload.cols = MAX_COLS + 1;
+                m.documents = MAX_COLS as u64 + 1;
+                m.pages = 1;
+            },
+        ];
+        for change in changes {
+            let mut m = sample();
+            change(&mut m);
+            for name in CONTENT_BLOBS.iter().chain(&HINT_BLOBS) {
+                if let Some(bytes) = m.expected_bytes(name) {
+                    m.blobs.get_mut(*name).unwrap().bytes = bytes;
+                }
+            }
+            let error = m.validate().unwrap_err();
+            assert!(error.0.contains("unacceptable shape"), "{error}");
         }
     }
 

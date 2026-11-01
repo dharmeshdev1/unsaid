@@ -76,7 +76,10 @@ unless all of these hold, doing the arithmetic in at least 64 bits:
 | `pages` | 1 to 64 |
 | `probes * rank.cols + pages * payload.cols` | At most 67,108,864 |
 | `dim` and `model_dim` | `dim` at least 1, at most `model_dim`, at most 8,192 |
-| `prototypes` | 1 to 16,777,216 |
+| `prototypes` | 1 to 1,048,576 |
+| `clusters` | 1 to 16,777,216 |
+| `name`, `model` | At most 1,024 bytes |
+| The manifest file | At most 1 MiB |
 | `documents` | At least `payload.cols`, below 2^32 - 1 |
 | `doc_scale`, `query_scale` | 0.001 to 1,000,000 |
 | Each `blobs[name].sha256` | Exactly 64 lowercase hexadecimal characters |
@@ -84,10 +87,11 @@ unless all of these hold, doing the arithmetic in at least 64 bits:
 | The model file | At most 2 GiB |
 | All public files together | At most 8 GiB |
 
-**A client must also not use a model it does not already trust.** A model shapes how a query is
-processed on the client, so one built to crash or slow down on certain words could reveal them, with
-no attack on the encryption at all. The reference client refuses any model whose hash is not compiled
-in, unless the user names that hash.
+**A client should not use a model it does not already trust.** A model shapes how a query is processed
+on the client, so one built to crash or slow down on certain words could reveal them, with no attack on
+the encryption at all. The command line client, the gateway and the MCP tool refuse any model whose hash
+is not compiled in, unless the user names that hash. The web page does the same, unless the same server
+supplied the page, because that page already had to be trusted just as much.
 
 ### Public matrices
 
@@ -157,7 +161,7 @@ Reusing `s` reveals the difference of two plaintexts, so a secret must only ever
    document's estimated similarity is its value divided by `doc_scale * query_scale`.
 6. **Choose pages.** Walk the documents from best to worst and collect each one's page, until there
    are `pages` distinct pages. If there are too few, add others so there is always the same number.
-   **Hold the next request** until twice the time step 5 took, because the time this step takes
+   **Wait** until twice the time step 5 took before going on, because the time this step takes
    depends on the results and the server can measure the gap.
 7. **Fetch.** For each page `p`, encrypt the unit vector with 1 at column `p` and `log_p = 8`.
    `POST /v1/fetch` the concatenated ciphertexts.
@@ -166,10 +170,13 @@ Reusing `s` reveals the difference of two plaintexts, so a secret must only ever
    documents than the layout says. If a check fails, drop that page, but do not change anything a
    server could observe.
 
-A process that has just connected should also hide how long step 1 took, since the server can time
-the gap between its last download and the first query. The reference client sends that first query
-on a multiple of 500 ms. A long-running client does not need this, because the server cannot tell
-when the question was asked.
+Steps 1 to 3 depend on the question too, and a server has a reference point whenever a program has just
+connected or is searching in a loop. So the reference client does all the work that does not depend on
+the question first, then runs steps 1 to 4 and sends the query on a multiple of 250 ms after the
+question arrived. The web page skips this, because a person's typing gives the server no reference point.
+
+A client should also close its connection as soon as it has read each answer. A connection left open
+closes later, after the results have been processed, and the server could time that.
 
 ## 6. Pages
 
@@ -194,7 +201,9 @@ documents `page_first[p]`, `page_first[p] + 1`, and so on.
 | `GET /v1/health` | `ok` |
 
 Queries must state a `Content-Length`, or they get a 411. A body that is empty, not a whole number of
-ciphertexts or not the stated length gets a 400, and one with too many ciphertexts gets a 413.
+ciphertexts or not the stated length gets a 400, and one with too many ciphertexts gets a 413. An upload
+that takes longer than 120 seconds, or stalls for 10, gets a 408. A server out of memory for uploads
+answers 503 rather than making anyone wait.
 
 A client must not follow redirects, because one could send a query anywhere, and should not read more
 than the exact size of the response it expects.

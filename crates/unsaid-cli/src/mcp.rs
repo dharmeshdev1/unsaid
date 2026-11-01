@@ -38,7 +38,7 @@ fn handle_call(engine: &Engine, plan: SearchPlan, params: &Value) -> Result<Valu
     let args = &params["arguments"];
     let query = args["query"].as_str().ok_or("query must be a string")?;
     let limit = args["limit"].as_u64().unwrap_or(5).clamp(1, 20) as usize;
-    let (outcome, _) = engine.search(query, limit, plan, false)?;
+    let (outcome, _) = engine.search(query, limit, plan)?;
     let mut text = String::new();
     if outcome.hits.is_empty() {
         text.push_str("No results.");

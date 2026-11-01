@@ -77,26 +77,25 @@ reduce a basis for `A` once and reuse the work, which is why `A` depends on the 
 
 ## Defences against a malicious server
 
-The design assumes that the server is an adversary and controls everything it sends. An independent
-adversarial review of an earlier version found real problems here, and every row marked with a star
-came out of it.
+The design assumes that the server is an adversary and controls everything it sends.
 
 | Attack | Defence |
 | --- | --- |
 | Weaken the encryption with chosen parameters | Parameters are compiled into the client, and a manifest that disagrees is refused |
 | Choose a public matrix with a trapdoor | The client derives `A` by hashing the index contents |
-| ★ Send a model that crashes or stalls on certain words, so that a missing request reveals them | Clients refuse any model not on a compiled-in list unless the user names its hash. The parser uses checked arithmetic and validates every shape, and a test confirms that thousands of randomly damaged files never panic |
-| ★ Choose sizes that overflow in a browser's 32-bit arithmetic, to crash on chosen clusters | Every size is checked in 64 bits against strict limits before anything is allocated |
-| ★ Time the gap before the second request, which depended on the chosen cluster's size | Every row of every answer is decrypted whatever the cluster's size, every entry is visited when choosing pages, and the request leaves at twice the fixed decryption time |
-| ★ Time how long a one-shot client takes to embed, which depends on the question's length | A client that has just connected sends its first query on a multiple of 500 ms. A long-running one sends at a time unrelated to connecting |
+| Send a model that crashes or stalls on certain words, so that a missing request reveals them | The command line client, gateway and MCP tool refuse any model not on a compiled-in list unless the user names its hash. The web page does too, unless the same server supplied the page. The parser uses checked arithmetic and validates every shape, and a test confirms that thousands of randomly damaged files never panic |
+| Choose sizes that overflow in a browser's 32-bit arithmetic, to crash on chosen clusters | Every size is checked in 64 bits against strict limits before anything sized by it is allocated |
+| Time the gap before the second request, which could depend on the chosen cluster's size or the results | Every row of every answer is decrypted whatever the cluster's size, every entry is visited when choosing pages, and the request is sealed and sent only after twice the fixed decryption time |
+| Time how long a client takes to embed and route, which depends on the question | The command line client, gateway and MCP tool send each query on a multiple of 250 ms after the question arrived. The web page does not, because a person's typing gives the server no reference point |
+| Time when the client closes its connection, which would show how long the results took to process | Connections close as soon as each answer has been read |
 | Learn from how the client reacts to a bad answer | Every search has the same shape, including when pages fail their checks, and each request has a fresh secret, so there is no decryption oracle |
 | Swap a page by adding to the answer, which needs no key | Pages are checked against a 128-bit digest, and a test performs exactly this attack |
 | Make the client use one secret twice | A secret is consumed by encrypting, so reuse does not compile, and there is a test proving that it does not |
-| ★ Exhaust the client with a huge or endless response, or a page full of empty documents | Responses are cut off at the exact size expected, connections time out, and a page may not hold more documents than the layout says |
-| ★ Redirect a query somewhere else | Redirects are not followed |
-| ★ Use a cache path such as `/dev/zero` as a file's hash | A hash must be 64 hexadecimal characters |
-| ★ Attack the terminal with escape sequences in result text | Control characters and direction overrides are removed before printing |
-| ★ Have a web page use the local gateway | The gateway refuses requests from browsers and unexpected hosts |
+| Exhaust the client with a huge or endless response, or a page full of empty documents | Responses are cut off at the exact size expected, requests have overall time limits, and a page may not hold more documents than it has bytes |
+| Redirect a query somewhere else | Redirects are refused |
+| Use a cache path such as `/dev/zero` as a file's hash | A hash must be 64 hexadecimal characters |
+| Attack the terminal with escape sequences in result text | Control characters and direction overrides are removed before printing |
+| Have a web page use the local gateway | The gateway refuses requests from browsers and unexpected hosts |
 | Serve different content, or a different traffic shape, to one person | Publish the `index_id`, which covers the whole manifest, and use `--pin` |
 
 `unsafe` is forbidden in every crate except the WebAssembly bindings, where the generated glue needs it.
@@ -108,8 +107,8 @@ came out of it.
   before, even from a new IP address. If you are separating identities, use `--pin`, or a separate
   `UNSAID_CACHE` directory for each one.
 - **Timing is reduced, not eliminated.** Ordinary jitter in your machine remains, and a question long
-  enough to take more than 500 ms to embed lands in a later window. Nobody has measured what is left
-  over a real network, and that would make a good project.
+  enough to take more than 250 ms to process lands in a later window, which a slower machine reaches
+  sooner. Nobody has measured what is left over a real network, and that would make a good project.
 - **Your reactions.** If a page fails its check and you search again, the server sees a second search.
   It could use that to test a guess about which page you asked for, one guess at a time.
 - **AI agents.** Results are text from the server, and a dishonest one could include instructions aimed
@@ -118,8 +117,8 @@ came out of it.
 - **Local side channels.** The Gaussian sampler reads its whole table for every sample, but the client
   as a whole makes no attempt to resist someone measuring timing or power on your own device.
 - **Denial of service.** The server does expensive work for anyone who asks. It limits the queries per
-  request, the memory held by uploads and its concurrency, but not connections, so put rate limits in
-  front of it.
+  request, the memory held by uploads, how long uploads take and its concurrency, but not connections
+  or the memory of answers waiting to be sent, so put rate limits in front of it.
 - **Multi-target attacks.** Security estimates are per query. With very many queries against one `A`,
   a lattice attacker could benefit somewhat from precomputation.
 

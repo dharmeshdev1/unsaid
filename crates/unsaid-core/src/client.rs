@@ -4,7 +4,9 @@
 //!
 //! ```text
 //! Index::begin(embedding, tokens)  -> (RankStage, request bytes)    send to /v1/rank
-//! RankStage::receive(answer, ...)  -> (FetchStage, request bytes)   send to /v1/fetch
+//! RankStage::decrypt(answer)       -> ScoredStage
+//! ScoredStage::pick(budget, limit) -> PickedStage
+//! PickedStage::seal(tokens)        -> (FetchStage, request bytes)   send to /v1/fetch
 //! FetchStage::receive(answer)      -> Outcome
 //! ```
 //!
@@ -13,9 +15,11 @@
 //! integrity check. A server that answers wrongly on purpose therefore cannot learn anything
 //! from how the client reacts.
 //!
-//! `RankStage::decrypt` and `ScoredStage::choose` are separate so that a caller can time the
-//! first, whose work never varies, and use that to hide how long the second took. The time
-//! between an answer and the next request is the one thing here a server can measure.
+//! A server can also measure the gap between an answer and the next request. Decrypting takes the
+//! same time for every search, and picking pages does not, so they are separate steps: a caller
+//! times the first and uses it to hide the second, before sealing the request, which also takes
+//! a fixed time. See `docs/protocol.md`. `RankStage::receive` does all three at once for callers
+//! with no one watching.
 
 use std::collections::HashMap;
 
@@ -161,6 +165,13 @@ pub struct ScoredStage {
     ranked: Vec<(u32, i32)>,
 }
 
+/// A search that has chosen its pages, ready to ask for them.
+pub struct PickedStage {
+    ranked: Vec<(u32, i32)>,
+    pages: Vec<usize>,
+    limit: usize,
+}
+
 /// A search waiting for its pages.
 pub struct FetchStage {
     ranked: Vec<(u32, i32)>,
@@ -225,6 +236,16 @@ impl Index {
         {
             return Err(bad("page boundaries are not increasing"));
         }
+        // A page holds at most one document per byte, which also bounds what decoding one can cost.
+        let page_ends = page_first.iter().skip(1).copied().chain([total as u32]);
+        if page_first
+            .iter()
+            .zip(page_ends)
+            .any(|(&first, end)| (end - first) as usize > manifest.payload.rows)
+        {
+            return Err(bad("a page holds more documents than it has bytes"));
+        }
+
         Ok(Self {
             id: crate::manifest::index_id(manifest_json),
             rank_a: manifest.rank_matrix(),
@@ -386,7 +407,6 @@ impl RankStage {
         }
         let answer = words(answer);
         let mut ranked: Vec<(u32, i32)> = Vec::with_capacity(self.secrets.len() * rows);
-        let mut seen = Vec::with_capacity(self.clusters.len());
         for ((secret, &cluster), part) in self
             .secrets
             .iter()
@@ -398,12 +418,7 @@ impl RankStage {
                 index.cluster_start[cluster],
                 index.cluster_start[cluster + 1],
             );
-            let size = if seen.contains(&cluster) {
-                0
-            } else {
-                (end - start) as usize
-            };
-            seen.push(cluster);
+            let size = (end - start) as usize;
             ranked.extend(scores.iter().enumerate().map(|(row, &score)| {
                 if row < size {
                     (start + row as u32, score)
@@ -424,31 +439,22 @@ impl RankStage {
         tokens: Vec<Prepared>,
         limit: usize,
     ) -> Result<(FetchStage, Vec<u8>), SearchError> {
-        self.decrypt(index, answer)?.choose(index, tokens, limit)
+        self.decrypt(index, answer)?
+            .pick(index, tokens.len(), limit)
+            .seal(index, tokens)
     }
 }
 
 impl ScoredStage {
-    /// Rank the documents, choose pages, and produce the bytes to send to `/v1/fetch`. Uses one
-    /// token per page. `limit` caps how many results are returned in the end.
-    pub fn choose(
-        mut self,
-        index: &Index,
-        tokens: Vec<Prepared>,
-        limit: usize,
-    ) -> Result<(FetchStage, Vec<u8>), SearchError> {
-        let m = index.manifest();
-        if tokens.is_empty() || tokens.iter().any(|t| t.len() != m.payload.cols) {
-            return Err(SearchError::Tokens(
-                "tokens do not fit the document matrix".into(),
-            ));
-        }
+    /// Rank the documents and choose `budget` pages. `limit` caps how many results are returned
+    /// in the end. How long this takes depends on the results.
+    pub fn pick(mut self, index: &Index, budget: usize, limit: usize) -> PickedStage {
+        let cols = index.manifest().payload.cols;
         self.ranked
             .sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
         // Take pages in order of their best document until the budget is used up, while looking
         // at every entry, so that the time this takes does not depend on how soon that happens.
-        let budget = tokens.len();
         let mut pages: Vec<usize> = Vec::with_capacity(budget);
         for &(doc, _) in &self.ranked {
             let page = index.page_of(if doc == PADDING { 0 } else { doc });
@@ -456,19 +462,46 @@ impl ScoredStage {
                 pages.push(page);
             }
         }
-        self.ranked.retain(|&(doc, _)| doc != PADDING);
         // Too few results still produce a full set of fetches, so the shape stays fixed.
         let mut filler = 0;
         while pages.len() < budget {
-            if !pages.contains(&filler) || filler + 1 >= m.payload.cols {
+            if !pages.contains(&filler) || filler + 1 >= cols {
                 pages.push(filler);
             }
-            filler = (filler + 1).min(m.payload.cols - 1);
+            filler = (filler + 1).min(cols - 1);
         }
+        PickedStage {
+            ranked: self.ranked,
+            pages,
+            limit,
+        }
+    }
+}
 
-        let mut request = Vec::with_capacity(budget * m.payload.cols * 4);
-        let mut secrets = Vec::with_capacity(budget);
-        for (token, &page) in tokens.into_iter().zip(&pages) {
+impl PickedStage {
+    /// Pages this search will ask for. Known only to the client.
+    pub fn pages(&self) -> &[usize] {
+        &self.pages
+    }
+
+    /// Produce the bytes to send to `/v1/fetch`. Uses one token per page.
+    pub fn seal(
+        self,
+        index: &Index,
+        tokens: Vec<Prepared>,
+    ) -> Result<(FetchStage, Vec<u8>), SearchError> {
+        let m = index.manifest();
+        if tokens.is_empty()
+            || tokens.len() != self.pages.len()
+            || tokens.iter().any(|t| t.len() != m.payload.cols)
+        {
+            return Err(SearchError::Tokens(
+                "tokens do not fit the document matrix".into(),
+            ));
+        }
+        let mut request = Vec::with_capacity(tokens.len() * m.payload.cols * 4);
+        let mut secrets = Vec::with_capacity(tokens.len());
+        for (token, &page) in tokens.into_iter().zip(&self.pages) {
             let (secret, ct) = token.seal(m.payload.log_p, &[(page, 1)]);
             request.extend(ct.iter().flat_map(|v| v.to_le_bytes()));
             secrets.push(secret);
@@ -476,9 +509,9 @@ impl ScoredStage {
         Ok((
             FetchStage {
                 ranked: self.ranked,
-                pages,
+                pages: self.pages,
                 secrets,
-                limit,
+                limit: self.limit,
             },
             request,
         ))

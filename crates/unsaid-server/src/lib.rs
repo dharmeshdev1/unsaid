@@ -12,12 +12,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Path as UrlPath, Request, State};
 use axum::http::{Extensions, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use tokio::sync::Semaphore;
+use futures_util::StreamExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
 use unsaid_core::Manifest;
 use unsaid_core::manifest::{index_id, sha256_hex};
@@ -27,9 +28,12 @@ use unsaid_lwe::Matrix;
 pub const MAX_QUERIES_PER_REQUEST: usize = 64;
 
 /// How long a client gets to finish sending a query.
-const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Memory set aside for uploads in progress. There is always room for one request of the largest
+/// How long an upload may go without any new data before it is dropped.
+const UPLOAD_STALL: Duration = Duration::from_secs(10);
+
+/// Memory that uploads in progress may hold. There is always room for one request of the largest
 /// size, whatever this says.
 const UPLOAD_MEMORY: usize = 1 << 30;
 
@@ -158,6 +162,50 @@ fn octets(body: Vec<u8>) -> Response {
         .into_response()
 }
 
+/// Read an upload as it arrives, taking memory only for bytes that have really come in, so that an
+/// idle connection holds nothing. Memory is never waited for, because partial uploads waiting for
+/// each other's memory would never finish.
+async fn read_upload(
+    memory: &Arc<Semaphore>,
+    body: Body,
+    length: usize,
+) -> Result<(Vec<u8>, Option<OwnedSemaphorePermit>), StatusCode> {
+    let deadline = tokio::time::Instant::now() + UPLOAD_TIMEOUT;
+    let mut stream = body.into_data_stream();
+    let (mut data, mut reserved, mut held) = (Vec::new(), None::<OwnedSemaphorePermit>, 0usize);
+    loop {
+        let wait = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(UPLOAD_STALL);
+        let chunk = match tokio::time::timeout(wait, stream.next()).await {
+            Err(_) => return Err(StatusCode::REQUEST_TIMEOUT),
+            Ok(None) => break,
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(_))) => return Err(StatusCode::BAD_REQUEST),
+        };
+        let size = data.len() + chunk.len();
+        if size > length {
+            break;
+        }
+        let needed = size.div_ceil(1024) - held;
+        if needed > 0 {
+            let Ok(permit) = memory.clone().try_acquire_many_owned(needed as u32) else {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            };
+            match &mut reserved {
+                Some(all) => all.merge(permit),
+                None => reserved = Some(permit),
+            }
+            held += needed;
+        }
+        data.extend_from_slice(&chunk);
+    }
+    if data.len() != length || stream.next().await.is_some() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok((data, reserved))
+}
+
 /// Multiply a request by one of the matrices.
 async fn answer(state: AppState, payload: bool, request: Request) -> Response {
     let (parts, body) = request.into_parts();
@@ -190,29 +238,15 @@ async fn answer(state: AppState, payload: bool, request: Request) -> Response {
         )
             .into_response();
     }
-    // Reserve the memory first, so that many slow uploads cannot exhaust it between them.
-    let kibibytes = length.div_ceil(1024) as u32;
-    let memory = state.index.upload_memory.clone();
-    let Ok(_reserved) = memory.acquire_many_owned(kibibytes).await else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let body = tokio::time::timeout(UPLOAD_TIMEOUT, axum::body::to_bytes(body, length)).await;
-    let body = match body {
-        Ok(Ok(body)) if body.len() == length => body,
-        Ok(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "the body was not the stated length",
-            )
-                .into_response();
-        }
-        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+    let (body, _reserved) = match read_upload(&state.index.upload_memory, body, length).await {
+        Ok(upload) => upload,
+        Err(status) => return status.into_response(),
     };
     let Ok(permit) = state.index.permits.clone().acquire_owned().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let index = state.index.clone();
-    let head = body.slice(..WATCH_BYTES.min(body.len()));
+    let head = body[..WATCH_BYTES.min(body.len())].to_vec();
     let started = Instant::now();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
@@ -282,8 +316,7 @@ async fn health() -> &'static str {
 
 /// Serve the web interface. The policy stops a script injected through a document's text from
 /// reaching any other site. It cannot protect anyone from this server's own page, which is why
-/// docs/security.md tells people who distrust the operator to use the command line client or a
-/// separately hosted copy of the page.
+/// docs/security.md tells people who distrust the operator to use the command line client.
 async fn asset(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
     let path = if uri.path() == "/" {
         "/index.html"

@@ -482,7 +482,7 @@ fn run_search(args: &SearchArgs) -> Result<(), String> {
     }
     let engine = connect(args.index.as_deref(), &args.connect)?;
     let plan = args.connect.plan(&engine);
-    let (mut outcome, trace) = engine.search(&query, args.limit, plan, args.index.is_none())?;
+    let (mut outcome, trace) = engine.search(&query, args.limit, plan)?;
     for hit in &mut outcome.hits {
         hit.document.title = printable(&hit.document.title);
         hit.document.text = printable(&hit.document.text);
@@ -519,7 +519,12 @@ fn run_search(args: &SearchArgs) -> Result<(), String> {
 const SAMPLE_CORPUS: &str = include_str!("../../../examples/sample.jsonl");
 
 fn run_demo(args: &DemoArgs) -> Result<(), String> {
-    let dir = models::cache_dir().join(format!("demo-index-{}", args.model.replace('/', "_")));
+    // The version is in the name, so a newer format never finds an older index here.
+    let dir = models::cache_dir().join(format!(
+        "demo-index-{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        args.model.replace('/', "_")
+    ));
     if !dir.join("manifest.json").is_file() {
         eprintln!("First run: indexing 1,000 sample articles, which takes about a minute.");
         let source = models::cache_dir().join("demo-sample.jsonl");
@@ -615,7 +620,7 @@ fn run_bench(args: &BenchArgs) -> Result<(), String> {
     }
     let mut traces = Vec::with_capacity(args.n);
     for i in 0..args.n {
-        let (outcome, trace) = engine.search(&owned[i % owned.len()], 10, plan, false)?;
+        let (outcome, trace) = engine.search(&owned[i % owned.len()], 10, plan)?;
         if outcome.corrupted_pages > 0 {
             return Err(format!("{} pages were corrupted", outcome.corrupted_pages));
         }
@@ -718,7 +723,8 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(message) = run() {
-        eprintln!("error: {message}");
+        // An error can quote text from a server.
+        eprintln!("error: {}", printable(&message));
         std::process::exit(1);
     }
 }

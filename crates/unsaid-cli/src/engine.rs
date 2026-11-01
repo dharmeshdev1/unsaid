@@ -6,20 +6,22 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use unsaid_core::client::{IndexFiles, SearchPlan};
-use unsaid_core::manifest::{BlobInfo, MatrixInfo, index_id, sha256_hex};
+use unsaid_core::manifest::{BlobInfo, MAX_MANIFEST_BYTES, MatrixInfo, index_id, sha256_hex};
 use unsaid_core::{Index, Manifest, Outcome};
 use unsaid_embed::{Embedder, is_known_model};
 use unsaid_lwe::{Matrix, Prepared};
 
 use crate::models::cache_dir;
 
-/// Longest manifest a client will read.
-const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+/// A longer question takes longer to embed. If a server has any reference point, such as having
+/// just answered this process, it can time that, so a query only leaves on a multiple of this
+/// after the question arrived. That covers all the work that depends on the question.
+const QUERY_WINDOW: Duration = Duration::from_millis(250);
 
-/// A process that has just connected sends its first query right after embedding it, and a
-/// longer question takes longer to embed. So that first query leaves on a multiple of this time,
-/// which hides everything up to the length of question this machine embeds within it.
-const EMBED_WINDOW: Duration = Duration::from_millis(500);
+/// Longest a query and its answer may take.
+const POST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Longest a public file may take to download.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Something that can answer encrypted queries.
 pub trait Transport: Send + Sync {
@@ -43,6 +45,9 @@ pub struct Http {
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
+        // Close each connection as soon as its answer is read. A connection left open would close
+        // later, after the results were processed, and a server could time that.
+        .max_idle_connections(0)
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(Duration::from_secs(120))
         .timeout_write(Duration::from_secs(120))
@@ -67,7 +72,11 @@ fn read_limited(response: ureq::Response, limit: u64, url: &str) -> Result<Vec<u
 }
 
 fn get(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
+    let response = agent
+        .get(url)
+        .timeout(DOWNLOAD_TIMEOUT)
+        .call()
+        .map_err(|e| format!("{url}: {e}"))?;
     read_limited(response, limit, url)
 }
 
@@ -78,6 +87,7 @@ impl Http {
         let response = self
             .agent
             .post(&url)
+            .timeout(POST_TIMEOUT)
             .set("Content-Type", "application/octet-stream")
             .send_bytes(request)
             .map_err(|e| format!("{url}: {e}"))?;
@@ -289,9 +299,16 @@ impl Engine {
         if embedder.dim() != m.model_dim {
             return Err("the model's vectors do not fit this index".to_owned());
         }
+        let matrix = |name: &str, shape: &MatrixInfo| {
+            let data = read(name)?;
+            if data.len() != shape.rows * shape.cols {
+                return Err(format!("{name} has the wrong size"));
+            }
+            Ok::<_, String>(Matrix::from_bytes(shape.rows, shape.cols, &data))
+        };
         let transport = InProcess {
-            rank: Matrix::from_bytes(m.rank.rows, m.rank.cols, &read("rank.matrix")?),
-            payload: Matrix::from_bytes(m.payload.rows, m.payload.cols, &read("payload.matrix")?),
+            rank: matrix("rank.matrix", &m.rank)?,
+            payload: matrix("payload.matrix", &m.payload)?,
         };
         Ok(Self {
             index,
@@ -378,12 +395,55 @@ impl Engine {
     ) -> Result<(Outcome, Trace), String> {
         let mut trace = Trace::default();
         let t = Instant::now();
-        let (tokens, fetch_tokens) = self.tokens(plan)?;
+        let tokens = self.tokens(plan)?;
+        trace.encrypt_ms = t.elapsed().as_secs_f64() * 1e3;
+        self.run(embedding, tokens, limit, None, trace)
+    }
+
+    /// Search for a query.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        plan: SearchPlan,
+    ) -> Result<(Outcome, Trace), String> {
+        let mut trace = Trace::default();
+        let t = Instant::now();
+        // This work is the same for any question, so it comes before the clock starts.
+        let tokens = self.tokens(plan)?;
+        trace.encrypt_ms = t.elapsed().as_secs_f64() * 1e3;
+        let asked = Instant::now();
+        let embedding = self.embed(query);
+        trace.embed_ms = asked.elapsed().as_secs_f64() * 1e3;
+        self.run(&embedding, tokens, limit, Some(asked), trace)
+    }
+
+    fn hold(&self, wait: Duration, trace: &mut Trace) {
+        if self.transport.observable() {
+            std::thread::sleep(wait);
+            trace.held_ms += wait.as_secs_f64() * 1e3;
+        }
+    }
+
+    fn run(
+        &self,
+        embedding: &[f32],
+        (tokens, fetch_tokens): (Vec<Prepared>, Vec<Prepared>),
+        limit: usize,
+        asked: Option<Instant>,
+        mut trace: Trace,
+    ) -> Result<(Outcome, Trace), String> {
+        let t = Instant::now();
         let (stage, request) = self
             .index
             .begin(embedding, tokens)
             .map_err(|e| e.to_string())?;
-        trace.encrypt_ms = t.elapsed().as_secs_f64() * 1e3;
+        trace.encrypt_ms += t.elapsed().as_secs_f64() * 1e3;
+        if let Some(asked) = asked {
+            let spent = asked.elapsed();
+            let windows = spent.as_nanos().div_ceil(QUERY_WINDOW.as_nanos()).max(1) as u32;
+            self.hold((QUERY_WINDOW * windows).saturating_sub(spent), &mut trace);
+        }
         trace.uploaded += request.len() as u64;
 
         let t = Instant::now();
@@ -396,17 +456,17 @@ impl Engine {
             .decrypt(&self.index, &answer)
             .map_err(|e| e.to_string())?;
         let decrypting = t.elapsed();
-        let (stage, request) = scored
-            .choose(&self.index, fetch_tokens, limit)
-            .map_err(|e| e.to_string())?;
+        let picked = scored.pick(&self.index, fetch_tokens.len(), limit);
         trace.decrypt_ms = t.elapsed().as_secs_f64() * 1e3;
-        // Ranking the results takes a time that depends on them. It is tiny next to the decryption
-        // before it, which takes a fixed time, so leaving at twice that hides it completely.
-        if self.transport.observable() {
-            let wait = (decrypting * 2).saturating_sub(t.elapsed());
-            std::thread::sleep(wait);
-            trace.held_ms = wait.as_secs_f64() * 1e3;
-        }
+        // Picking pages takes a time that depends on the results. It is tiny next to the decryption
+        // before it, which takes a fixed time, so waiting until twice that hides it.
+        self.hold((decrypting * 2).saturating_sub(t.elapsed()), &mut trace);
+
+        let t = Instant::now();
+        let (stage, request) = picked
+            .seal(&self.index, fetch_tokens)
+            .map_err(|e| e.to_string())?;
+        trace.encrypt_ms += t.elapsed().as_secs_f64() * 1e3;
         trace.uploaded += request.len() as u64;
 
         let t = Instant::now();
@@ -419,30 +479,6 @@ impl Engine {
             .receive(&self.index, &answer)
             .map_err(|e| e.to_string())?;
         trace.decrypt_ms += t.elapsed().as_secs_f64() * 1e3;
-        Ok((outcome, trace))
-    }
-
-    /// Search for a query. Set `just_connected` when this is the first thing a process does after
-    /// connecting, because the server can then time how long the query took to embed.
-    pub fn search(
-        &self,
-        query: &str,
-        limit: usize,
-        plan: SearchPlan,
-        just_connected: bool,
-    ) -> Result<(Outcome, Trace), String> {
-        let t = Instant::now();
-        let embedding = self.embed(query);
-        let spent = t.elapsed();
-        let mut held = Duration::ZERO;
-        if just_connected && self.transport.observable() {
-            let windows = spent.as_nanos().div_ceil(EMBED_WINDOW.as_nanos()).max(1) as u32;
-            held = (EMBED_WINDOW * windows).saturating_sub(spent);
-            std::thread::sleep(held);
-        }
-        let (outcome, mut trace) = self.search_embedding(&embedding, limit, plan)?;
-        trace.embed_ms = spent.as_secs_f64() * 1e3;
-        trace.held_ms += held.as_secs_f64() * 1e3;
         Ok((outcome, trace))
     }
 }

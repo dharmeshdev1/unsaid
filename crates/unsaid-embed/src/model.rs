@@ -491,11 +491,13 @@ impl Embedder {
 
     /// Embed a search query, keeping at most 128 tokens of it.
     pub fn embed_query(&self, text: &str) -> Vec<f32> {
+        self.bert.encode(&self.query_tokens(text))
+    }
+
+    fn query_tokens(&self, text: &str) -> Vec<u32> {
         let limit = MAX_QUERY_TOKENS.min(self.max_tokens);
-        let ids = self
-            .tokenizer
-            .encode(&format!("{}{text}", self.query_prefix), limit);
-        self.bert.encode(&ids)
+        self.tokenizer
+            .encode(&format!("{}{text}", self.query_prefix), limit)
     }
 
     /// Embed a document, keeping at most `max_tokens` tokens of it.
@@ -703,14 +705,65 @@ mod tests {
         assert!(Embedder::load(&file(&header, &data)).is_err());
     }
 
+    /// Set these tensors to the given shapes, stored as floats, and rebuild the data to match.
+    fn reshaped(changes: &[(&str, &[usize])]) -> Vec<u8> {
+        let (mut header, _) = tiny_model();
+        let mut data = Vec::new();
+        let infos = std::mem::take(&mut header.tensors);
+        for info in infos {
+            let changed = changes.iter().find(|(name, _)| *name == info.name);
+            let shape = changed
+                .map_or(info.shape.as_slice(), |(_, shape)| shape)
+                .to_vec();
+            float_tensor(&mut header.tensors, &mut data, &info.name, &shape);
+        }
+        file(&header, &data)
+    }
+
+    /// Every width is consistent here, so only the check for a zero width can refuse this.
     #[test]
     fn a_zero_width_layer_is_refused_rather_than_failing_while_encoding() {
-        let (mut header, data) = tiny_model();
-        let name = "encoder.layer.0.intermediate.dense.weight";
-        let tensor = header.tensors.iter_mut().find(|t| t.name == name).unwrap();
-        tensor.format = WeightFormat::F32;
-        tensor.shape = vec![0, H];
-        assert!(Embedder::load(&file(&header, &data)).is_err());
+        let p = "encoder.layer.0";
+        let consistent = reshaped(&[
+            (&format!("{p}.intermediate.dense.weight"), &[0, H]),
+            (&format!("{p}.intermediate.dense.bias"), &[0]),
+            (&format!("{p}.output.dense.weight"), &[H, 0]),
+        ]);
+        assert!(Embedder::load(&consistent).is_err());
+    }
+
+    /// With no layers and tensors of no width, everything else about this model is consistent.
+    #[test]
+    fn a_model_of_no_width_is_refused_rather_than_failing_while_encoding() {
+        let (mut header, _) = tiny_model();
+        header.hidden = 0;
+        header.layers = 0;
+        header.tensors.retain(|t| t.name.starts_with("embeddings."));
+        for tensor in &mut header.tensors {
+            tensor.format = WeightFormat::F32;
+            *tensor.shape.last_mut().unwrap() = 0;
+        }
+        assert!(Embedder::load(&file(&header, &[])).is_err());
+    }
+
+    #[test]
+    fn queries_are_cut_to_a_fixed_length() {
+        let (mut header, _) = tiny_model();
+        header.max_tokens = 400;
+        let mut data = Vec::new();
+        let infos = std::mem::take(&mut header.tensors);
+        for info in infos {
+            let shape = if info.name == "embeddings.position_embeddings.weight" {
+                vec![400, H]
+            } else {
+                info.shape.clone()
+            };
+            float_tensor(&mut header.tensors, &mut data, &info.name, &shape);
+        }
+        let model = Embedder::load(&file(&header, &data)).unwrap();
+        let long = "secret ".repeat(1000);
+        assert_eq!(model.query_tokens(&long).len(), MAX_QUERY_TOKENS);
+        assert_eq!(model.embed_query(&long).len(), H);
     }
 
     /// Whatever a damaged file does, loading must return, and anything that loads must then
