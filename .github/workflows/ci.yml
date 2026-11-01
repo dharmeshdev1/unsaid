@@ -48,6 +48,14 @@ jobs:
           targets: wasm32-unknown-unknown
       - run: cargo build --release -p unsaid-wasm --target wasm32-unknown-unknown
 
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t unsaid .
+      - run: docker run --rm unsaid unsaid --version
+
   tutorial:
     name: Tutorial runs
     runs-on: ubuntu-latest

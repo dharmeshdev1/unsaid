@@ -22,7 +22,8 @@ Read this part carefully. These things stay visible:
 
 | Visible to the server | How to reduce it |
 | --- | --- |
-| Your IP address and the time of each search | Use a VPN or Tor |
+| Your IP address | Use a VPN or Tor |
+| The time of each search | Nothing here hides this |
 | How many searches you make, and how far apart | Send decoy searches at a steady rate |
 | That you use this index at all | Choose a broad index. Someone using an index only about one illness reveals that topic even though each query is hidden |
 | Which result you open, if you follow its link | The destination site sees your visit. The text in the results is already on your device |

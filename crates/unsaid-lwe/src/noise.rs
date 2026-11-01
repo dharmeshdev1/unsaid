@@ -46,6 +46,13 @@ mod tests {
         assert!(failure_log2(12, 1 << 20, 1000) > failure_log2(12, 1 << 20, 100));
     }
 
+    /// With a half step of 2^17 and a variance of 40.96 * 2^20, the exponent is exactly 200.
+    #[test]
+    fn the_bound_matches_a_calculation_by_hand() {
+        let expected = 1.0 + 1000f64.log2() - 200.0 / std::f64::consts::LN_2;
+        assert!((failure_log2(14, 1 << 20, 1000) - expected).abs() < 1e-9);
+    }
+
     #[test]
     fn an_all_zero_matrix_cannot_fail() {
         assert_eq!(failure_log2(8, 0, 10), f64::NEG_INFINITY);

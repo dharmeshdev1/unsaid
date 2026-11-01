@@ -76,9 +76,8 @@ downloads the same map, so the choice happens entirely on your device.
 
 A question often sits near a boundary between clusters, so the client asks about several at once.
 These are called probes, and each one is another encrypted query. All of this is why the default
-of 8 probes works so well in the [benchmarks](benchmarks.md): searching one cluster with a single
-centre, as earlier systems did, reached 62 to 88% of exact search quality in our experiments, while
-8 probes with prototypes reach 95 to 98%.
+of 8 probes works so well. [The benchmarks](benchmarks.md) compare it with the simple baseline of one
+cluster chosen by a single centre.
 
 ## Getting the documents
 

@@ -62,9 +62,10 @@ class Pattern {
   constructor(canvas) {
     this.canvas = canvas;
     this.context = canvas.getContext("2d");
-    this.drawn = 0;
+    this.marks = new Uint8Array(0);
+    this.filled = 0; // Bytes accepted so far.
+    this.drawn = 0; // Bytes on screen so far. Animation closes the gap between the two.
     this.frame = 0;
-    this.chunks = [];
     this.tint = getComputedStyle(document.documentElement).getPropertyValue("--tint").trim();
     this.resize();
     new ResizeObserver(() => this.resize()).observe(canvas);
@@ -78,80 +79,65 @@ class Pattern {
     this.canvas.height = Math.round(height * ratio);
     this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
     this.columns = Math.ceil(width / CELL);
-    this.rows = Math.ceil(height / CELL);
-    this.capacity = this.columns * this.rows;
-    this.redraw();
+    this.capacity = this.columns * Math.ceil(height / CELL);
+    const kept = this.marks.subarray(0, Math.min(this.filled, this.capacity));
+    this.marks = new Uint8Array(this.capacity);
+    this.marks.set(kept);
+    this.filled = kept.length;
+    this.drawn = 0;
+    this.drawUpTo(this.filled);
   }
 
   clear() {
     cancelAnimationFrame(this.frame);
+    this.frame = 0;
     this.context.clearRect(0, 0, this.canvas.clientWidth, this.canvas.clientHeight);
-    this.chunks = [];
+    this.filled = 0;
     this.drawn = 0;
   }
 
-  mark(index, byte) {
-    const x = (index % this.columns) * CELL;
-    const y = Math.floor(index / this.columns) * CELL;
-    const c = this.context;
-    c.globalAlpha = 0.45 + 0.55 * ((byte >> 1) & 3) / 3;
-    c.beginPath();
-    if (byte & 1) {
-      c.moveTo(x + 0.5, y + 0.5);
-      c.lineTo(x + CELL - 0.5, y + CELL - 0.5);
-    } else {
-      c.moveTo(x + CELL - 0.5, y + 0.5);
-      c.lineTo(x + 0.5, y + CELL - 0.5);
-    }
-    c.stroke();
-  }
-
-  prepare() {
+  drawUpTo(target) {
     const c = this.context;
     c.strokeStyle = this.tint;
     c.lineWidth = 1.15;
     c.lineCap = "round";
+    for (; this.drawn < target; this.drawn++) {
+      const byte = this.marks[this.drawn];
+      const x = (this.drawn % this.columns) * CELL;
+      const y = Math.floor(this.drawn / this.columns) * CELL;
+      c.globalAlpha = 0.45 + 0.55 * ((byte >> 1) & 3) / 3;
+      c.beginPath();
+      if (byte & 1) {
+        c.moveTo(x + 0.5, y + 0.5);
+        c.lineTo(x + CELL - 0.5, y + CELL - 0.5);
+      } else {
+        c.moveTo(x + CELL - 0.5, y + 0.5);
+        c.lineTo(x + 0.5, y + CELL - 0.5);
+      }
+      c.stroke();
+    }
   }
 
-  redraw() {
-    if (!this.chunks.length) return;
-    const chunks = this.chunks;
-    this.clear();
-    this.chunks = chunks;
-    this.prepare();
-    for (const bytes of chunks) {
-      for (const byte of bytes) {
-        if (this.drawn >= this.capacity) return;
-        this.mark(this.drawn++, byte);
-      }
-    }
+  animate() {
+    if (this.frame) return;
+    let last = performance.now();
+    const perMs = this.capacity / 520; // The whole area takes about half a second.
+    const step = (now) => {
+      this.drawUpTo(Math.min(this.filled, this.drawn + Math.ceil((now - last) * perMs)));
+      last = now;
+      this.frame = this.drawn < this.filled ? requestAnimationFrame(step) : 0;
+    };
+    this.frame = requestAnimationFrame(step);
   }
 
   /** Add marks for these bytes, up to `share` of the whole area. Returns the bytes shown. */
   add(bytes, share) {
-    const count = Math.min(bytes.length, Math.ceil(this.capacity * share), this.capacity - this.drawn);
-    const shown = bytes.slice(0, count);
-    this.chunks.push(shown);
-    this.prepare();
-    if (calm) {
-      for (const byte of shown) this.mark(this.drawn++, byte);
-      return count;
-    }
-    const started = performance.now();
-    const from = this.drawn;
-    const target = from + count;
-    const duration = 420;
-    const step = (now) => {
-      const reach = Math.min(target, from + Math.ceil(((now - started) / duration) * count));
-      this.prepare();
-      while (this.drawn < reach) {
-        this.mark(this.drawn, shown[this.drawn - from]);
-        this.drawn++;
-      }
-      if (this.drawn < target) this.frame = requestAnimationFrame(step);
-    };
-    this.drawn = from;
-    this.frame = requestAnimationFrame(step);
+    const room = this.capacity - this.filled;
+    const count = Math.min(bytes.length, Math.ceil(this.capacity * share), room);
+    this.marks.set(bytes.subarray(0, count), this.filled);
+    this.filled += count;
+    if (calm) this.drawUpTo(this.filled);
+    else this.animate();
     return count;
   }
 }

@@ -56,7 +56,7 @@ def main():
             if query.split()[0] not in logged:
                 problems.append(f"the log preview did not follow typing: {logged!r}")
             page.keyboard.press("Enter")
-            page.wait_for_function("document.body.dataset.state !== 'ready'")
+            page.wait_for_selector("body:not([data-state=ready])", state="attached")
             page.wait_for_selector("body[data-state=done]", timeout=120_000)
             titles = page.locator(".hit h3").all_inner_texts()
             print(f"{query!r}\n   {page.inner_text('#status')}\n   {titles[:5]}")

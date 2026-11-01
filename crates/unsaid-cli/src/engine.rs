@@ -1,13 +1,14 @@
 //! A complete private search client: embed locally, encrypt, talk to a server, decrypt.
 
 use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use unsaid_core::client::{IndexFiles, SearchPlan};
 use unsaid_core::{Index, Manifest, Outcome};
 use unsaid_embed::Embedder;
-use unsaid_lwe::Matrix;
+use unsaid_lwe::{Matrix, Prepared};
 
 use crate::models::cache_dir;
 
@@ -99,11 +100,20 @@ impl Trace {
     }
 }
 
+/// Encryption work done ahead of time. Each token is handed out once and then gone.
+#[derive(Default)]
+struct Pool {
+    rank: Vec<Prepared>,
+    fetch: Vec<Prepared>,
+}
+
 /// A connected client.
 pub struct Engine {
     index: Index,
     embedder: Embedder,
     transport: Box<dyn Transport>,
+    pool: Mutex<Pool>,
+    taken: Condvar,
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -179,6 +189,8 @@ impl Engine {
             index,
             embedder,
             transport: Box::new(Http { base }),
+            pool: Mutex::default(),
+            taken: Condvar::new(),
         })
     }
 
@@ -210,7 +222,66 @@ impl Engine {
             index,
             embedder,
             transport: Box::new(transport),
+            pool: Mutex::default(),
+            taken: Condvar::new(),
         })
+    }
+
+    /// Keep the encryption work for `searches` searches ready in the background, so that a
+    /// long-running process such as the gateway can start each search at once.
+    pub fn prepare_in_background(self: &Arc<Self>, plan: SearchPlan, searches: usize) {
+        let engine = Arc::clone(self);
+        std::thread::spawn(move || {
+            loop {
+                {
+                    let lock = engine.pool.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _idle = engine
+                        .taken
+                        .wait_while(lock, |pool| {
+                            pool.rank.len() >= plan.probes * searches
+                                && pool.fetch.len() >= plan.pages * searches
+                        })
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+                let Ok((rank, fetch)) = engine.prepare(plan) else {
+                    // Searches prepare for themselves and will report the error.
+                    return;
+                };
+                let mut pool = engine.pool.lock().unwrap_or_else(PoisonError::into_inner);
+                pool.rank.extend(rank);
+                pool.fetch.extend(fetch);
+            }
+        });
+    }
+
+    fn prepare(&self, plan: SearchPlan) -> Result<(Vec<Prepared>, Vec<Prepared>), String> {
+        let rank = (0..plan.probes)
+            .map(|_| self.index.prepare_rank())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let fetch = (0..plan.pages)
+            .map(|_| self.index.prepare_fetch())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok((rank, fetch))
+    }
+
+    /// Tokens for one search, from the pool if it has enough.
+    fn tokens(&self, plan: SearchPlan) -> Result<(Vec<Prepared>, Vec<Prepared>), String> {
+        {
+            let mut pool = self.pool.lock().unwrap_or_else(PoisonError::into_inner);
+            if pool.rank.len() >= plan.probes && pool.fetch.len() >= plan.pages {
+                let rank_from = pool.rank.len() - plan.probes;
+                let fetch_from = pool.fetch.len() - plan.pages;
+                let tokens = (
+                    pool.rank.split_off(rank_from),
+                    pool.fetch.split_off(fetch_from),
+                );
+                self.taken.notify_all();
+                return Ok(tokens);
+            }
+        }
+        self.prepare(plan)
     }
 
     /// The verified index.
@@ -232,14 +303,7 @@ impl Engine {
     ) -> Result<(Outcome, Trace), String> {
         let mut trace = Trace::default();
         let t = Instant::now();
-        let tokens = (0..plan.probes)
-            .map(|_| self.index.prepare_rank())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        let fetch_tokens = (0..plan.pages)
-            .map(|_| self.index.prepare_fetch())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+        let (tokens, fetch_tokens) = self.tokens(plan)?;
         let (stage, request) = self
             .index
             .begin(embedding, tokens)

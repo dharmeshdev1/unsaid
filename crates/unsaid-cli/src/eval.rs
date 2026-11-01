@@ -141,27 +141,34 @@ pub fn run(options: &EvalOptions) -> Result<(), String> {
 
     let embedder = Embedder::load(&options.model).map_err(|e| e.to_string())?;
     let dim = embedder.dim();
-    let texts: Vec<String> = corpus
-        .iter()
-        .map(|d| {
-            if d.title.is_empty() {
-                d.text.clone()
-            } else {
-                format!("{}. {}", d.title, d.text)
-            }
-        })
-        .collect();
     std::fs::create_dir_all(&options.out).map_err(|e| e.to_string())?;
     let cache = options
         .out
         .join(format!("embeddings.{}.f32", embedder.name()));
-    let embeddings = crate::embed_corpus(&embedder, &texts, options.max_tokens, Some(&cache))?;
+    // A dataset of millions needs the memory, so its texts are only copied if they get embedded.
+    let embeddings = match crate::cached_embeddings(&cache, corpus.len(), dim) {
+        Some(found) => found,
+        None => {
+            let texts: Vec<String> = corpus
+                .iter()
+                .map(|d| {
+                    if d.title.is_empty() {
+                        d.text.clone()
+                    } else {
+                        format!("{}. {}", d.title, d.text)
+                    }
+                })
+                .collect();
+            crate::embed_corpus(&embedder, &texts, options.max_tokens, Some(&cache))?
+        }
+    };
+    let ids: Vec<String> = corpus.iter().map(|d| d.id.clone()).collect();
     let documents: Vec<Document> = corpus
-        .iter()
+        .into_iter()
         .map(|d| Document {
-            title: d.title.clone(),
-            text: d.text.clone(),
-            url: d.id.clone(),
+            title: d.title,
+            text: d.text,
+            url: d.id,
         })
         .collect();
 
@@ -183,7 +190,6 @@ pub fn run(options: &EvalOptions) -> Result<(), String> {
 
     // Very large datasets need the memory for the rest of the run.
     drop(documents);
-    drop(texts);
 
     let query_vectors: Vec<Vec<f32>> = queries
         .par_iter()
@@ -191,7 +197,7 @@ pub fn run(options: &EvalOptions) -> Result<(), String> {
         .collect();
 
     // Exact search over the original embeddings is the baseline.
-    let ids: Vec<&str> = corpus.iter().map(|d| d.id.as_str()).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
     let exact: Vec<(f64, f64)> = queries
         .par_iter()
         .zip(&query_vectors)

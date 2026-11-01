@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use unsaid_build::{BuildOptions, BuildReport, build};
 use unsaid_core::client::IndexFiles;
-use unsaid_core::{Document, Index, Manifest};
+use unsaid_core::{Document, Index, Manifest, pages};
 use unsaid_lwe::chacha::Drbg;
 use unsaid_lwe::{LWE_DIM, Matrix};
 
@@ -110,18 +110,7 @@ fn open(dir: &Path) -> Index {
 
 /// Exactly what the HTTP server does with a request body.
 fn serve(matrix: &Matrix, request: &[u8]) -> Vec<u8> {
-    assert_eq!(request.len() % (matrix.cols() * 4), 0);
-    let mut out = Vec::new();
-    for ct in request.chunks_exact(matrix.cols() * 4) {
-        let words: Vec<u32> = ct
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        for v in matrix.apply(&words) {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    out
+    matrix.answer(request).unwrap()
 }
 
 fn server_matrices(index: &Index, dir: &Path) -> (Matrix, Matrix) {
@@ -472,6 +461,88 @@ fn garbage_answers_are_survived_with_the_same_traffic() {
     assert_eq!(out.corrupted_pages, plan.pages);
     assert!(out.hits.is_empty());
     fs::remove_dir_all(&b.dir).unwrap();
+}
+
+/// Adding to an answer needs no key: it adds the same amount to the decrypted value. So a server
+/// can turn one page into another of its choosing, if it guesses which page was asked for. The
+/// forgery decodes perfectly, so only the published digest can catch it.
+#[test]
+fn a_forged_page_that_decodes_cleanly_is_caught_by_its_digest() {
+    let b = build_corpus("forged", 400, small_options());
+    let index = open(&b.dir);
+    let (rank, payload) = server_matrices(&index, &b.dir);
+    let plan = index.default_plan();
+    let m = index.manifest().clone();
+    let e = &b.embeddings[..MODEL_DIM];
+
+    let tokens = (0..plan.probes)
+        .map(|_| index.prepare_rank().unwrap())
+        .collect();
+    let (stage, request) = index.begin(e, tokens).unwrap();
+    let answer = serve(&rank, &request);
+    let tokens = (0..plan.pages)
+        .map(|_| index.prepare_fetch().unwrap())
+        .collect();
+    let (stage, request) = stage.receive(&index, &answer, tokens, 50).unwrap();
+    let page = stage.pages()[0];
+    let mut answer = serve(&payload, &request);
+
+    let rows = m.payload.rows;
+    let stored = read(&b.dir, "payload.matrix");
+    let real: Vec<u8> = (0..rows)
+        .map(|r| stored[r * m.payload.cols + page])
+        .collect();
+    let mut documents = pages::decode(&real).unwrap();
+    documents[0].title = "Forged".into();
+    let refs: Vec<&Document> = documents.iter().collect();
+    let forged = pages::encode(&refs, rows).unwrap();
+    assert_eq!(pages::decode(&forged).unwrap()[0].title, "Forged");
+
+    for (r, word) in answer[..rows * 4].chunks_exact_mut(4).enumerate() {
+        let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        let change = u32::from(forged[r]).wrapping_sub(u32::from(real[r])) << 24;
+        word.copy_from_slice(&value.wrapping_add(change).to_le_bytes());
+    }
+
+    let out = stage.receive(&index, &answer).unwrap();
+    assert_eq!(out.corrupted_pages, 1);
+    assert!(out.hits.iter().all(|hit| hit.document.title != "Forged"));
+    fs::remove_dir_all(&b.dir).unwrap();
+}
+
+/// More queries than there are clusters or pages must still all be sent, because the number of
+/// requests is the one thing a server can see.
+#[test]
+fn small_indexes_still_send_every_query_they_promised() {
+    for n in [1usize, 2, 5, 17] {
+        let mut options = small_options();
+        options.page_bytes = Some(2048);
+        let b = build_corpus(&format!("shape{n}"), n, options);
+        let index = open(&b.dir);
+        let (rank, payload) = server_matrices(&index, &b.dir);
+        let m = index.manifest().clone();
+        let e = &b.embeddings[..MODEL_DIM];
+
+        let probes = m.clusters + 3;
+        let tokens = (0..probes)
+            .map(|_| index.prepare_rank().unwrap())
+            .collect();
+        let (stage, request) = index.begin(e, tokens).unwrap();
+        assert_eq!(request.len(), probes * m.rank.cols * 4, "n = {n}");
+
+        let fetches = m.payload.cols + 4;
+        let tokens = (0..fetches)
+            .map(|_| index.prepare_fetch().unwrap())
+            .collect();
+        let answer = serve(&rank, &request);
+        let (stage, request) = stage.receive(&index, &answer, tokens, 3).unwrap();
+        assert_eq!(request.len(), fetches * m.payload.cols * 4, "n = {n}");
+
+        let out = stage.receive(&index, &serve(&payload, &request)).unwrap();
+        assert_eq!(out.corrupted_pages, 0, "n = {n}");
+        assert_eq!(out.hits[0].document, b.docs[0], "n = {n}");
+        fs::remove_dir_all(&b.dir).unwrap();
+    }
 }
 
 #[test]

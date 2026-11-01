@@ -256,6 +256,21 @@ struct EvalArgs {
     tuning: IndexTuning,
 }
 
+/// Read previously computed embeddings, if the file exists and has the right size.
+pub(crate) fn cached_embeddings(path: &Path, rows: usize, dim: usize) -> Option<Vec<f32>> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() != rows * dim * 4 {
+        return None;
+    }
+    eprintln!("using embeddings from {}", path.display());
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
+}
+
 /// Embed texts on every core, optionally keeping the result in a file.
 pub(crate) fn embed_corpus(
     embedder: &Embedder,
@@ -263,17 +278,8 @@ pub(crate) fn embed_corpus(
     max_tokens: usize,
     cache: Option<&Path>,
 ) -> Result<Vec<f32>, String> {
-    let dim = embedder.dim();
-    if let Some(path) = cache {
-        if let Ok(bytes) = std::fs::read(path) {
-            if bytes.len() == texts.len() * dim * 4 {
-                eprintln!("using embeddings from {}", path.display());
-                return Ok(bytes
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect());
-            }
-        }
+    if let Some(found) = cache.and_then(|p| cached_embeddings(p, texts.len(), embedder.dim())) {
+        return Ok(found);
     }
     let total = texts.len();
     let done = AtomicUsize::new(0);
@@ -473,6 +479,7 @@ const SAMPLE_CORPUS: &str = include_str!("../../../examples/sample.jsonl");
 fn run_demo(args: &DemoArgs) -> Result<(), String> {
     let dir = models::cache_dir().join(format!("demo-index-{}", args.model.replace('/', "_")));
     if !dir.join("manifest.json").is_file() {
+        eprintln!("First run: indexing 1,000 sample articles, which takes about a minute.");
         let source = models::cache_dir().join("demo-sample.jsonl");
         std::fs::create_dir_all(models::cache_dir()).map_err(|e| e.to_string())?;
         std::fs::write(&source, SAMPLE_CORPUS).map_err(|e| e.to_string())?;
@@ -636,8 +643,9 @@ fn run() -> Result<(), String> {
             runtime.block_on(proxy::run(engine, plan, &args.listen))
         }
         Command::Mcp(args) => {
-            let engine = connect(None, &args)?;
+            let engine = Arc::new(connect(None, &args)?);
             let plan = args.plan(&engine);
+            engine.prepare_in_background(plan, 2);
             mcp::run(&engine, plan)
         }
         Command::Embed(args) => {

@@ -189,6 +189,21 @@ mod tests {
         assert!(decode(&page).is_none());
     }
 
+    /// A long valid document compresses to almost nothing, so only the limit can stop it.
+    #[test]
+    fn a_bomb_made_of_valid_documents_is_refused() {
+        let doc = Document {
+            title: "a".repeat(MAX_INFLATED + 1024),
+            text: String::new(),
+            url: String::new(),
+        };
+        let packed = compress_to_vec(&serialize(&[&doc]), 7);
+        assert!(packed.len() < u16::MAX as usize);
+        let mut page = (packed.len() as u16).to_le_bytes().to_vec();
+        page.extend_from_slice(&packed);
+        assert!(decode(&page).is_none());
+    }
+
     #[test]
     fn oversized_string_lengths_are_refused() {
         let mut raw = Vec::new();

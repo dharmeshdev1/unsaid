@@ -84,10 +84,9 @@ async fn info(State(gateway): State<Gateway>) -> Json<Value> {
 
 /// Serve on `address` until interrupted.
 pub async fn run(engine: Engine, plan: SearchPlan, address: &str) -> Result<(), String> {
-    let gateway = Gateway {
-        engine: Arc::new(engine),
-        plan,
-    };
+    let engine = Arc::new(engine);
+    engine.prepare_in_background(plan, 2);
+    let gateway = Gateway { engine, plan };
     let app = Router::new()
         .route("/search", post(search_post).get(search_get))
         .route("/info", get(info))
