@@ -37,7 +37,10 @@ mod tests {
         // Standard errors: sigma / sqrt(n) for the mean, sqrt(2) sigma^2 / sqrt(n) for the variance.
         assert!(mean.abs() < 5.0 * SIGMA / (n as f64).sqrt(), "mean {mean}");
         let var_err = 2f64.sqrt() * SIGMA * SIGMA / (n as f64).sqrt();
-        assert!((var - SIGMA * SIGMA).abs() < 5.0 * var_err, "variance {var}");
+        assert!(
+            (var - SIGMA * SIGMA).abs() < 5.0 * var_err,
+            "variance {var}"
+        );
     }
 
     #[test]
@@ -65,7 +68,10 @@ mod tests {
         let df = f64::from(cells - 1);
         let a = 2.0 / (9.0 * df);
         let limit = df * (1.0 - a + 4.75 * a.sqrt()).powi(3);
-        assert!(chi < limit, "chi2 = {chi:.1} over limit {limit:.1} with {cells} cells");
+        assert!(
+            chi < limit,
+            "chi2 = {chi:.1} over limit {limit:.1} with {cells} cells"
+        );
     }
 
     #[test]

@@ -35,7 +35,11 @@ pub struct LweParams {
 impl LweParams {
     /// The only parameters this version of the protocol accepts.
     pub fn current() -> Self {
-        Self { n: LWE_DIM, log_q: LOG_Q, sigma: SIGMA }
+        Self {
+            n: LWE_DIM,
+            log_q: LOG_Q,
+            sigma: SIGMA,
+        }
     }
 }
 
@@ -145,7 +149,10 @@ impl Manifest {
             ));
         }
         if self.dim == 0 || self.model_dim == 0 || self.dim > self.model_dim {
-            return fail(format!("bad dimensions {} and {}", self.dim, self.model_dim));
+            return fail(format!(
+                "bad dimensions {} and {}",
+                self.dim, self.model_dim
+            ));
         }
         if self.clusters == 0 || self.prototypes == 0 {
             return fail("an index needs clusters and prototypes".into());
@@ -159,7 +166,7 @@ impl Manifest {
         if !(self.doc_scale > 0.0 && self.query_scale > 0.0) {
             return fail("quantisation scales must be positive".into());
         }
-        if self.rank.cols != self.clusters.checked_mul(self.dim).unwrap_or(usize::MAX) {
+        if self.rank.cols != self.clusters.saturating_mul(self.dim) {
             return fail("ranking matrix does not have clusters * dim columns".into());
         }
         if self.payload.log_p != 8 {
@@ -170,7 +177,9 @@ impl Manifest {
                 return fail(format!("{label} matrix has an unacceptable shape"));
             }
             if !(2..=24).contains(&m.log_p) {
-                return fail(format!("{label} matrix has an unacceptable plaintext modulus"));
+                return fail(format!(
+                    "{label} matrix has an unacceptable plaintext modulus"
+                ));
             }
         }
         for name in CONTENT_BLOBS.iter().chain(&HINT_BLOBS) {
@@ -256,7 +265,10 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn sample() -> Manifest {
-        let blob = |s: &str| BlobInfo { sha256: sha256_hex(s.as_bytes()), bytes: 1 };
+        let blob = |s: &str| BlobInfo {
+            sha256: sha256_hex(s.as_bytes()),
+            bytes: 1,
+        };
         let mut blobs = BTreeMap::new();
         for name in CONTENT_BLOBS.iter().chain(&HINT_BLOBS) {
             blobs.insert((*name).to_owned(), blob(name));
@@ -274,8 +286,18 @@ pub(crate) mod tests {
             query_scale: 64.0,
             probes: 1,
             pages: 1,
-            rank: MatrixInfo { rows: 6, cols: 8, log_p: 14, failure_log2: -100.0 },
-            payload: MatrixInfo { rows: 64, cols: 4, log_p: 8, failure_log2: -100.0 },
+            rank: MatrixInfo {
+                rows: 6,
+                cols: 8,
+                log_p: 14,
+                failure_log2: -100.0,
+            },
+            payload: MatrixInfo {
+                rows: 64,
+                cols: 4,
+                log_p: 8,
+                failure_log2: -100.0,
+            },
             lwe: LweParams::current(),
             blobs,
         }
@@ -291,10 +313,22 @@ pub(crate) mod tests {
     #[test]
     fn weakened_lattice_parameters_are_rejected() {
         for lwe in [
-            LweParams { n: 16, ..LweParams::current() },
-            LweParams { n: 1024, ..LweParams::current() },
-            LweParams { sigma: 0.0, ..LweParams::current() },
-            LweParams { log_q: 64, ..LweParams::current() },
+            LweParams {
+                n: 16,
+                ..LweParams::current()
+            },
+            LweParams {
+                n: 1024,
+                ..LweParams::current()
+            },
+            LweParams {
+                sigma: 0.0,
+                ..LweParams::current()
+            },
+            LweParams {
+                log_q: 64,
+                ..LweParams::current()
+            },
         ] {
             let m = Manifest { lwe, ..sample() };
             assert!(m.validate().unwrap_err().0.contains("lattice parameters"));
@@ -313,7 +347,8 @@ pub(crate) mod tests {
 
     #[test]
     fn inconsistent_fields_are_rejected() {
-        let cases: Vec<Box<dyn Fn(&mut Manifest)>> = vec![
+        type Tamper = Box<dyn Fn(&mut Manifest)>;
+        let cases: Vec<Tamper> = vec![
             Box::new(|m| m.format = "other".into()),
             Box::new(|m| m.dim = 9),
             Box::new(|m| m.rank.cols = 7),

@@ -16,7 +16,10 @@ pub struct IngestOptions {
 
 impl Default for IngestOptions {
     fn default() -> Self {
-        Self { chunk_words: 120, overlap_words: 20 }
+        Self {
+            chunk_words: 120,
+            overlap_words: 20,
+        }
     }
 }
 
@@ -29,8 +32,7 @@ struct JsonDoc {
     url: String,
 }
 
-const TEXT_EXTENSIONS: [&str; 8] =
-    ["txt", "md", "markdown", "rst", "text", "html", "htm", "org"];
+const TEXT_EXTENSIONS: [&str; 8] = ["txt", "md", "markdown", "rst", "text", "html", "htm", "org"];
 
 /// Read documents from a `.jsonl` file (one `{"title","text","url"}` object per line), a
 /// single text file, or a directory walked recursively in sorted order.
@@ -64,7 +66,11 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         if entry.file_type()?.is_dir() {
             walk(&path, out)?;
         } else {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             if ext == "jsonl" || TEXT_EXTENSIONS.contains(&ext.as_str()) {
                 out.push(path);
             }
@@ -81,7 +87,11 @@ fn read_file(
 ) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let contents = String::from_utf8_lossy(&bytes);
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     if ext == "jsonl" {
         for (i, line) in contents.lines().enumerate() {
             if line.trim().is_empty() {
@@ -99,14 +109,19 @@ fn read_file(
         let (title, text) = strip_html(&contents);
         (title.unwrap_or_else(|| file_title(path)), text)
     } else {
-        (first_heading(&contents).unwrap_or_else(|| file_title(path)), contents.into_owned())
+        (
+            first_heading(&contents).unwrap_or_else(|| file_title(path)),
+            contents.into_owned(),
+        )
     };
     push_chunks(&title, &text, &url, options, docs);
     Ok(())
 }
 
 fn file_title(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().replace(['_', '-'], " ")).unwrap_or_default()
+    path.file_stem()
+        .map(|s| s.to_string_lossy().replace(['_', '-'], " "))
+        .unwrap_or_default()
 }
 
 fn first_heading(text: &str) -> Option<String> {
@@ -125,7 +140,11 @@ fn push_chunks(
 ) {
     let chunks = chunk_words(text, options.chunk_words, options.overlap_words);
     for chunk in chunks {
-        docs.push(Document { title: title.to_owned(), text: chunk, url: url.to_owned() });
+        docs.push(Document {
+            title: title.to_owned(),
+            text: chunk,
+            url: url.to_owned(),
+        });
     }
 }
 
@@ -246,7 +265,15 @@ mod tests {
 
     #[test]
     fn malformed_html_does_not_panic_or_lose_text_before_it() {
-        for bad in ["keep <", "keep <b", "keep <script>x", "<title>x", "<>", "a < b > c", "<é>ü"] {
+        for bad in [
+            "keep <",
+            "keep <b",
+            "keep <script>x",
+            "<title>x",
+            "<>",
+            "a < b > c",
+            "<é>ü",
+        ] {
             let (_, text) = strip_html(bad);
             if bad.starts_with("keep") {
                 assert!(text.contains("keep"), "{bad}");
@@ -278,10 +305,21 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let good = dir.join("good.jsonl");
-        fs::write(&good, "{\"title\":\"T\",\"text\":\"body\",\"url\":\"u\"}\n\n{\"text\":\"only\"}\n").unwrap();
+        fs::write(
+            &good,
+            "{\"title\":\"T\",\"text\":\"body\",\"url\":\"u\"}\n\n{\"text\":\"only\"}\n",
+        )
+        .unwrap();
         let docs = read_documents(&good, &IngestOptions::default()).unwrap();
         assert_eq!(docs.len(), 2);
-        assert_eq!(docs[0], Document { title: "T".into(), text: "body".into(), url: "u".into() });
+        assert_eq!(
+            docs[0],
+            Document {
+                title: "T".into(),
+                text: "body".into(),
+                url: "u".into()
+            }
+        );
         let bad = dir.join("bad.jsonl");
         fs::write(&bad, "{\"text\":\"ok\"}\nnot json\n").unwrap();
         let e = read_documents(&bad, &IngestOptions::default()).unwrap_err();

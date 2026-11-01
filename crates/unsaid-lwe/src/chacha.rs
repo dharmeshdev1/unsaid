@@ -202,6 +202,14 @@ mod tests {
     use rand_chacha::ChaCha12Rng;
     use rand_core::{RngCore, SeedableRng};
 
+    /// The test vector in docs/protocol.md, which an independent Python client also produces.
+    #[test]
+    fn matches_the_vector_published_in_the_protocol() {
+        let mut row = [0u32; 4];
+        expand12(&[0u8; 32], 0, &mut row);
+        assert_eq!(row, [0x6a9a_f49b, 0x53f9_5507, 0x12ce_1f81, 0xd583_265f]);
+    }
+
     /// RFC 8439 section 2.3.2.
     #[test]
     fn matches_the_rfc_8439_block_test_vector() {
@@ -229,7 +237,11 @@ mod tests {
         for lane in 0..LANES {
             let mut single = [0u32; WORDS_PER_GROUP];
             group::<12>(&key, &nonce, 40 + lane as u32, &mut single);
-            assert_eq!(&wide[lane * 16..lane * 16 + 16], &single[..16], "lane {lane}");
+            assert_eq!(
+                &wide[lane * 16..lane * 16 + 16],
+                &single[..16],
+                "lane {lane}"
+            );
         }
     }
 

@@ -96,7 +96,10 @@ impl Tokenizer {
         let mut out = Vec::new();
         for word in cleaned.split_whitespace() {
             let normal: String = if self.lowercase {
-                word.to_lowercase().nfd().filter(|&c| category(c) != Gc::NonspacingMark).collect()
+                word.to_lowercase()
+                    .nfd()
+                    .filter(|&c| category(c) != Gc::NonspacingMark)
+                    .collect()
             } else {
                 word.to_owned()
             };

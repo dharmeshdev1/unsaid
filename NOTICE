@@ -1,0 +1,20 @@
+Unsaid
+Copyright 2026 Dharmesh Meena
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This project uses or redistributes the following, each under its own license.
+
+Embedding models, downloaded on first use and not stored in this repository:
+  all-MiniLM-L6-v2, Copyright the Sentence Transformers authors, Apache License 2.0
+    https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+  bge-small-en-v1.5, Copyright the Beijing Academy of Artificial Intelligence, MIT License
+    https://huggingface.co/BAAI/bge-small-en-v1.5
+
+Text in examples/sample.jsonl and in the demo index:
+  From Simple English Wikipedia, licensed under Creative Commons Attribution-ShareAlike 4.0.
+  Each passage records the URL of its article. https://simple.wikipedia.org
+  https://creativecommons.org/licenses/by-sa/4.0/
+
+Fonts in web/fonts, under the SIL Open Font License 1.1 (licenses included there):
+  Besley, Copyright 2020 The Besley Project Authors
+  Atkinson Hyperlegible, Copyright 2020 Braille Institute of America, Inc.

@@ -44,7 +44,10 @@ impl Pca {
     /// # Panics
     /// If `output_dim` is zero or larger than `input_dim`, or `data` is empty.
     pub fn fit(data: &[f32], input_dim: usize, output_dim: usize, max_samples: usize) -> Self {
-        assert!(output_dim >= 1 && output_dim <= input_dim, "bad output dimension");
+        assert!(
+            output_dim >= 1 && output_dim <= input_dim,
+            "bad output dimension"
+        );
         let total = data.len() / input_dim;
         assert!(total > 0, "no data");
         let step = (total / max_samples.max(1)).max(1);
@@ -98,13 +101,20 @@ impl Pca {
         let mut order: Vec<usize> = (0..input_dim).collect();
         order.sort_by(|&a, &b| values[b].total_cmp(&values[a]).then(a.cmp(&b)));
         let sum: f64 = values.iter().map(|v| v.max(0.0)).sum();
-        let kept: f64 = order[..output_dim].iter().map(|&i| values[i].max(0.0)).sum();
+        let kept: f64 = order[..output_dim]
+            .iter()
+            .map(|&i| values[i].max(0.0))
+            .sum();
 
         let mut components = Vec::with_capacity(output_dim * input_dim);
         for &column in &order[..output_dim] {
-            let v: Vec<f64> = (0..input_dim).map(|r| vectors[r * input_dim + column]).collect();
+            let v: Vec<f64> = (0..input_dim)
+                .map(|r| vectors[r * input_dim + column])
+                .collect();
             // The sign of an eigenvector is arbitrary, so fix one for reproducibility.
-            let pivot = v.iter().fold(0f64, |best, &x| if x.abs() > best.abs() { x } else { best });
+            let pivot = v
+                .iter()
+                .fold(0f64, |best, &x| if x.abs() > best.abs() { x } else { best });
             let sign = if pivot < 0.0 { -1.0 } else { 1.0 };
             components.extend(v.iter().map(|&x| (x * sign) as f32));
         }
@@ -139,7 +149,12 @@ pub fn symmetric_eigen(mut a: Vec<f64>, n: usize) -> (Vec<f64>, Vec<f64>) {
     for i in 0..n {
         v[i * n + i] = 1.0;
     }
-    let scale: f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt().max(f64::MIN_POSITIVE);
+    let scale: f64 = a
+        .iter()
+        .map(|x| x * x)
+        .sum::<f64>()
+        .sqrt()
+        .max(f64::MIN_POSITIVE);
     for _sweep in 0..60 {
         let mut off = 0f64;
         for i in 0..n {
@@ -247,16 +262,23 @@ mod tests {
         }
         let pca = Pca::fit(&data, 3, 1, 1000);
         let c = &pca.components[..3];
-        assert!((c[0].abs() - 0.7071).abs() < 1e-3 && (c[1].abs() - 0.7071).abs() < 1e-3);
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((f64::from(c[0].abs()) - half).abs() < 1e-3);
+        assert!((f64::from(c[1].abs()) - half).abs() < 1e-3);
         assert!(c[2].abs() < 1e-3);
         assert!(pca.explained > 0.999);
     }
 
     #[test]
     fn pca_is_deterministic_and_independent_of_thread_count() {
-        let data: Vec<f32> = (0..64 * 400).map(|i| ((i * 2654435761u64 as usize) >> 7) as u8 as f32).collect();
+        let data: Vec<f32> = (0..64 * 400)
+            .map(|i| ((i * 2654435761u64 as usize) >> 7) as u8 as f32)
+            .collect();
         let a = Pca::fit(&data, 64, 8, 1000);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let b = pool.install(|| Pca::fit(&data, 64, 8, 1000));
         assert_eq!(a.components, b.components);
         assert_eq!(a.mean, b.mean);

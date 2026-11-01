@@ -41,15 +41,17 @@ impl PublicMatrix {
 /// Wrapping inner product of signed bytes with words.
 #[inline]
 fn dot_i8(row: &[i8], x: &[u32]) -> u32 {
-    row.iter()
-        .zip(x)
-        .fold(0u32, |acc, (&m, &v)| acc.wrapping_add((m as i32 as u32).wrapping_mul(v)))
+    row.iter().zip(x).fold(0u32, |acc, (&m, &v)| {
+        acc.wrapping_add((m as i32 as u32).wrapping_mul(v))
+    })
 }
 
 /// Wrapping inner product of two word vectors.
 #[inline]
 pub(crate) fn dot_u32(a: &[u32], b: &[u32]) -> u32 {
-    a.iter().zip(b).fold(0u32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
+    a.iter()
+        .zip(b)
+        .fold(0u32, |acc, (&x, &y)| acc.wrapping_add(x.wrapping_mul(y)))
 }
 
 /// A database as a dense row-major matrix of signed bytes.
@@ -97,7 +99,11 @@ impl Matrix {
 
     /// Largest squared Euclidean norm of any row. This decides the noise budget.
     pub fn max_row_norm_sq(&self) -> u64 {
-        let norm = |row: &[i8]| row.iter().map(|&v| (i64::from(v) * i64::from(v)) as u64).sum();
+        let norm = |row: &[i8]| {
+            row.iter()
+                .map(|&v| (i64::from(v) * i64::from(v)) as u64)
+                .sum()
+        };
         #[cfg(feature = "parallel")]
         let max = self.data.par_chunks(self.cols.max(1)).map(norm).max();
         #[cfg(not(feature = "parallel"))]
@@ -132,7 +138,11 @@ impl Matrix {
     /// holding a key. It depends only on public `A` and on `M`, so it is the same for every
     /// client and is computed once.
     pub fn hint(&self, a: &PublicMatrix) -> Vec<u32> {
-        assert_eq!(a.cols(), self.cols, "public matrix does not fit this database");
+        assert_eq!(
+            a.cols(),
+            self.cols,
+            "public matrix does not fit this database"
+        );
         let mut hint = vec![0u32; self.rows * LWE_DIM];
         // Working through blocks of A keeps the per-row loop inside the cache.
         const BLOCK: usize = 256;
@@ -161,11 +171,36 @@ impl Matrix {
                 }
             };
             #[cfg(feature = "parallel")]
-            hint.par_chunks_mut(LWE_DIM).enumerate().for_each(accumulate);
+            hint.par_chunks_mut(LWE_DIM)
+                .enumerate()
+                .for_each(accumulate);
             #[cfg(not(feature = "parallel"))]
             hint.chunks_mut(LWE_DIM).enumerate().for_each(accumulate);
         }
         hint
+    }
+}
+
+impl Matrix {
+    /// Answer a request: a series of whole ciphertexts as little-endian words, each multiplied
+    /// by this matrix, with the answers returned the same way. `None` if the request is empty
+    /// or is not a whole number of ciphertexts. This is all a server ever computes.
+    pub fn answer(&self, request: &[u8]) -> Option<Vec<u8>> {
+        let width = self.cols() * 4;
+        if request.is_empty() || request.len() % width != 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(request.len() / width * self.rows() * 4);
+        let mut words = vec![0u32; self.cols()];
+        for ciphertext in request.chunks_exact(width) {
+            for (word, bytes) in words.iter_mut().zip(ciphertext.chunks_exact(4)) {
+                *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            }
+            for value in self.apply(&words) {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        Some(out)
     }
 }
 
@@ -202,12 +237,11 @@ mod tests {
         let m = pseudo_matrix(13, 257, 42);
         let x: Vec<u32> = (0..257u32).map(|i| i.wrapping_mul(2654435761)).collect();
         let got = m.apply(&x);
-        for i in 0..13 {
-            let mut want = 0u32;
-            for j in 0..257 {
-                want = want.wrapping_add((i32::from(m.row(i)[j]) as u32).wrapping_mul(x[j]));
-            }
-            assert_eq!(got[i], want, "row {i}");
+        for (i, &value) in got.iter().enumerate() {
+            let want = m.row(i).iter().zip(&x).fold(0u32, |sum, (&entry, &word)| {
+                sum.wrapping_add((i32::from(entry) as u32).wrapping_mul(word))
+            });
+            assert_eq!(value, want, "row {i}");
         }
     }
 
@@ -255,5 +289,29 @@ mod tests {
     #[should_panic(expected = "wrong length")]
     fn wrong_data_length_is_refused() {
         Matrix::new(2, 2, vec![0; 3]);
+    }
+
+    #[test]
+    fn answer_multiplies_each_ciphertext_in_turn() {
+        let m = Matrix::new(2, 2, vec![1, 2, 3, 4]);
+        let mut request = Vec::new();
+        for v in [10u32, 100, 1, 0] {
+            request.extend_from_slice(&v.to_le_bytes());
+        }
+        let out: Vec<u32> = m
+            .answer(&request)
+            .unwrap()
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(out, vec![210, 430, 1, 3]);
+    }
+
+    #[test]
+    fn answer_refuses_partial_and_empty_requests() {
+        let m = Matrix::new(2, 2, vec![1, 2, 3, 4]);
+        assert_eq!(m.answer(&[]), None);
+        assert_eq!(m.answer(&[0u8; 7]), None);
+        assert_eq!(m.answer(&[0u8; 12]), None);
     }
 }

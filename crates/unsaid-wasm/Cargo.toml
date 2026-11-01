@@ -1,0 +1,22 @@
+[package]
+name = "unsaid-wasm"
+description = "The Unsaid client in WebAssembly, so a browser can search privately with nothing installed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Does not inherit the workspace's ban on unsafe code: the wasm-bindgen macros expand to unsafe
+# foreign function glue. Nothing in this crate is written by hand with unsafe.
+[dependencies]
+unsaid-core = { workspace = true, default-features = false }
+unsaid-embed.workspace = true
+unsaid-lwe = { workspace = true, default-features = false }
+serde_json.workspace = true
+wasm-bindgen = "=0.2.106"

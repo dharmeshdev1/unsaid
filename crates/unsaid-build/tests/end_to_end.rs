@@ -54,9 +54,22 @@ fn temp_dir(label: &str) -> PathBuf {
 fn build_corpus(label: &str, n: usize, options: BuildOptions) -> Built {
     let (docs, embeddings) = corpus(n, 12, 3);
     let dir = temp_dir(label);
-    let report =
-        build(&docs, &embeddings, "test-model", MODEL_DIM, b"model bytes", &options, &dir).unwrap();
-    Built { dir, report, docs, embeddings }
+    let report = build(
+        &docs,
+        &embeddings,
+        "test-model",
+        MODEL_DIM,
+        b"model bytes",
+        &options,
+        &dir,
+    )
+    .unwrap();
+    Built {
+        dir,
+        report,
+        docs,
+        embeddings,
+    }
 }
 
 fn small_options() -> BuildOptions {
@@ -100,8 +113,10 @@ fn serve(matrix: &Matrix, request: &[u8]) -> Vec<u8> {
     assert_eq!(request.len() % (matrix.cols() * 4), 0);
     let mut out = Vec::new();
     for ct in request.chunks_exact(matrix.cols() * 4) {
-        let words: Vec<u32> =
-            ct.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let words: Vec<u32> = ct
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
         for v in matrix.apply(&words) {
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -125,10 +140,14 @@ fn search(
     k: usize,
 ) -> unsaid_core::Outcome {
     let plan = index.default_plan();
-    let tokens = (0..plan.probes).map(|_| index.prepare_rank().unwrap()).collect();
+    let tokens = (0..plan.probes)
+        .map(|_| index.prepare_rank().unwrap())
+        .collect();
     let (stage, request) = index.begin(embedding, tokens).unwrap();
     let answer = serve(rank, &request);
-    let tokens = (0..plan.pages).map(|_| index.prepare_fetch().unwrap()).collect();
+    let tokens = (0..plan.pages)
+        .map(|_| index.prepare_fetch().unwrap())
+        .collect();
     let (stage, request) = stage.receive(index, &answer, tokens, k).unwrap();
     stage.receive(index, &serve(payload, &request)).unwrap()
 }
@@ -146,7 +165,10 @@ fn a_query_equal_to_a_document_finds_that_document() {
         if out.hits.first().map(|h| h.document.title.as_str()) == Some(b.docs[i].title.as_str()) {
             found += 1;
             let h = &out.hits[0];
-            assert_eq!(h.document, b.docs[i], "the document must arrive byte for byte");
+            assert_eq!(
+                h.document, b.docs[i],
+                "the document must arrive byte for byte"
+            );
             assert!(h.score > 0.9, "score {}", h.score);
         }
     }
@@ -163,7 +185,10 @@ fn decrypted_scores_are_exactly_the_plaintext_inner_products() {
     let m = index.manifest().clone();
     let e = &b.embeddings[5 * MODEL_DIM..6 * MODEL_DIM];
     let projected = index.project(e);
-    let plain: Vec<i32> = projected.iter().map(|v| (v * m.query_scale).round() as i32).collect();
+    let plain: Vec<i32> = projected
+        .iter()
+        .map(|v| (v * m.query_scale).round() as i32)
+        .collect();
     let token = index.prepare_rank().unwrap();
     let (stage, request) = index.begin(e, vec![token]).unwrap();
     let cluster = stage.clusters()[0];
@@ -173,7 +198,13 @@ fn decrypted_scores_are_exactly_the_plaintext_inner_products() {
     let mut expected = Vec::new();
     for row in 0..m.rank.rows {
         let block = &rank.row(row)[cluster * m.dim..(cluster + 1) * m.dim];
-        expected.push(block.iter().zip(&plain).map(|(&a, &b)| i32::from(a) * b).sum::<i32>());
+        expected.push(
+            block
+                .iter()
+                .zip(&plain)
+                .map(|(&a, &b)| i32::from(a) * b)
+                .sum::<i32>(),
+        );
     }
     let tokens = vec![index.prepare_fetch().unwrap()];
     let (fetch, _) = stage.receive(&index, &answer, tokens, 10_000).unwrap();
@@ -181,8 +212,11 @@ fn decrypted_scores_are_exactly_the_plaintext_inner_products() {
     // The decryption itself is checked against the expected row values in the next test
     // through the rank order, and directly here through a fresh decryption.
     let token = index.prepare_rank().unwrap();
-    let entries: Vec<(usize, i32)> =
-        plain.iter().enumerate().map(|(i, &v)| (cluster * m.dim + i, v)).collect();
+    let entries: Vec<(usize, i32)> = plain
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (cluster * m.dim + i, v))
+        .collect();
     let (secret, ct) = token.seal(m.rank.log_p, &entries);
     let got = secret.open_signed(
         m.rank.log_p,
@@ -212,14 +246,20 @@ fn private_ranking_matches_a_plaintext_scan_of_the_routed_clusters() {
         let e = &b.embeddings[q * MODEL_DIM..(q + 1) * MODEL_DIM];
         let out = search(&index, &rank, &payload, e, 5);
         let projected = index.project(e);
-        let plain: Vec<i32> =
-            projected.iter().map(|v| (v * m.query_scale).round() as i32).collect();
+        let plain: Vec<i32> = projected
+            .iter()
+            .map(|v| (v * m.query_scale).round() as i32)
+            .collect();
         let mut scan: Vec<(i32, u32)> = Vec::new();
         for &c in &index.route(&projected, m.probes) {
             let start: u32 = sizes[..c].iter().sum();
             for row in 0..sizes[c] as usize {
                 let block = &rank.row(row)[c * m.dim..(c + 1) * m.dim];
-                let s: i32 = block.iter().zip(&plain).map(|(&a, &b)| i32::from(a) * b).sum();
+                let s: i32 = block
+                    .iter()
+                    .zip(&plain)
+                    .map(|(&a, &b)| i32::from(a) * b)
+                    .sum();
                 scan.push((s, start + row as u32));
             }
         }
@@ -246,16 +286,23 @@ fn every_search_has_the_same_traffic_shape() {
     let mut sizes = std::collections::BTreeSet::new();
     for q in [0usize, 7, 300, 599] {
         let e = &b.embeddings[q * MODEL_DIM..(q + 1) * MODEL_DIM];
-        let tokens = (0..plan.probes).map(|_| index.prepare_rank().unwrap()).collect();
+        let tokens = (0..plan.probes)
+            .map(|_| index.prepare_rank().unwrap())
+            .collect();
         let (stage, r1) = index.begin(e, tokens).unwrap();
         let answer = serve(&rank, &r1);
-        let tokens = (0..plan.pages).map(|_| index.prepare_fetch().unwrap()).collect();
+        let tokens = (0..plan.pages)
+            .map(|_| index.prepare_fetch().unwrap())
+            .collect();
         let (_, r2) = stage.receive(&index, &answer, tokens, 5).unwrap();
         sizes.insert((r1.len(), r2.len()));
     }
     assert_eq!(
         sizes.into_iter().collect::<Vec<_>>(),
-        vec![(plan.probes * m.rank.cols * 4, plan.pages * m.payload.cols * 4)]
+        vec![(
+            plan.probes * m.rank.cols * 4,
+            plan.pages * m.payload.cols * 4
+        )]
     );
     fs::remove_dir_all(&b.dir).unwrap();
 }
@@ -278,9 +325,15 @@ fn ciphertext_bytes_are_uniform_whatever_the_query() {
             total += request.len() as u64;
         }
         let expect = total as f64 / 256.0;
-        let chi: f64 = counts.iter().map(|&c| (c as f64 - expect).powi(2) / expect).sum();
+        let chi: f64 = counts
+            .iter()
+            .map(|&c| (c as f64 - expect).powi(2) / expect)
+            .sum();
         // 255 degrees of freedom: the 1e-6 upper tail is about 361.
-        assert!(chi < 361.0, "chi2 = {chi:.1} for query {q}, over {total} bytes");
+        assert!(
+            chi < 361.0,
+            "chi2 = {chi:.1} for query {q}, over {total} bytes"
+        );
     }
     fs::remove_dir_all(&b.dir).unwrap();
 }
@@ -291,12 +344,21 @@ fn builds_are_deterministic_across_thread_counts() {
     let options = small_options();
     let (a, b) = (temp_dir("det-a"), temp_dir("det-b"));
     let first = build(&docs, &embeddings, "m", MODEL_DIM, b"x", &options, &a).unwrap();
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     let second = pool
         .install(|| build(&docs, &embeddings, "m", MODEL_DIM, b"x", &options, &b))
         .unwrap();
     assert_eq!(first.index_id, second.index_id);
-    for name in ["manifest.json", "rank.matrix", "payload.matrix", "rank.hint", "routing.bin"] {
+    for name in [
+        "manifest.json",
+        "rank.matrix",
+        "payload.matrix",
+        "rank.hint",
+        "routing.bin",
+    ] {
         assert_eq!(read(&a, name), read(&b, name), "{name} differs");
     }
     fs::remove_dir_all(&a).unwrap();
@@ -327,7 +389,10 @@ fn tampering_with_any_public_file_is_detected() {
                 payload_hint: &changed[4],
             },
         );
-        assert!(result.is_err(), "file {which} was accepted after being modified");
+        assert!(
+            result.is_err(),
+            "file {which} was accepted after being modified"
+        );
     }
     fs::remove_dir_all(&b.dir).unwrap();
 }
@@ -363,10 +428,16 @@ fn hostile_but_consistent_manifests_are_refused() {
     assert!(try_open(&weak).is_err(), "a weakened lattice was accepted");
     let mut count = base.clone();
     count.documents += 1;
-    assert!(try_open(&count).is_err(), "a wrong document count was accepted");
+    assert!(
+        try_open(&count).is_err(),
+        "a wrong document count was accepted"
+    );
     let mut rows = base.clone();
     rows.rank.rows = 1;
-    assert!(try_open(&rows).is_err(), "a shape that contradicts the files was accepted");
+    assert!(
+        try_open(&rows).is_err(),
+        "a shape that contradicts the files was accepted"
+    );
     fs::remove_dir_all(&b.dir).unwrap();
 }
 
@@ -381,13 +452,19 @@ fn garbage_answers_are_survived_with_the_same_traffic() {
     let e = &b.embeddings[..MODEL_DIM];
     let mut rng = Drbg::from_seed(&[8u8; 32]);
     let mut noise = |len: usize| -> Vec<u8> {
-        (0..len / 4).flat_map(|_| rng.next_u32().to_le_bytes()).collect()
+        (0..len / 4)
+            .flat_map(|_| rng.next_u32().to_le_bytes())
+            .collect()
     };
 
-    let tokens = (0..plan.probes).map(|_| index.prepare_rank().unwrap()).collect();
+    let tokens = (0..plan.probes)
+        .map(|_| index.prepare_rank().unwrap())
+        .collect();
     let (stage, _) = index.begin(e, tokens).unwrap();
     let answer = noise(plan.probes * m.rank.rows * 4);
-    let tokens = (0..plan.pages).map(|_| index.prepare_fetch().unwrap()).collect();
+    let tokens = (0..plan.pages)
+        .map(|_| index.prepare_fetch().unwrap())
+        .collect();
     let (stage, request) = stage.receive(&index, &answer, tokens, 5).unwrap();
     assert_eq!(request.len(), plan.pages * m.payload.cols * 4);
     let answer = noise(plan.pages * m.payload.rows * 4);
@@ -413,7 +490,11 @@ fn tokens_for_the_wrong_matrix_are_refused() {
     let b = build_corpus("tokens", 300, small_options());
     let index = open(&b.dir);
     let e = &b.embeddings[..MODEL_DIM];
-    assert!(index.begin(e, vec![index.prepare_fetch().unwrap()]).is_err());
+    assert!(
+        index
+            .begin(e, vec![index.prepare_fetch().unwrap()])
+            .is_err()
+    );
     assert!(index.begin(e, vec![]).is_err());
     fs::remove_dir_all(&b.dir).unwrap();
 }
@@ -435,7 +516,10 @@ fn tiny_corpora_work_and_filler_fetches_keep_the_shape() {
         assert_eq!(out.hits[0].document, b.docs[0], "n = {n}");
         assert!(out.hits.len() <= 3);
         let mut seen = std::collections::HashSet::new();
-        assert!(out.hits.iter().all(|h| seen.insert(h.doc)), "duplicate hits for n = {n}");
+        assert!(
+            out.hits.iter().all(|h| seen.insert(h.doc)),
+            "duplicate hits for n = {n}"
+        );
         fs::remove_dir_all(&b.dir).unwrap();
     }
 }
@@ -445,12 +529,19 @@ fn reports_describe_the_files_on_disk() {
     let b = build_corpus("report", 400, small_options());
     let r = &b.report;
     let size = |name: &str| fs::metadata(b.dir.join(name)).unwrap().len();
-    assert_eq!(r.private_bytes, size("rank.matrix") + size("payload.matrix"));
+    assert_eq!(
+        r.private_bytes,
+        size("rank.matrix") + size("payload.matrix")
+    );
     assert_eq!(size("rank.hint"), (r.rank_rows * LWE_DIM * 4) as u64);
     assert_eq!(size("payload.hint"), (r.page_bytes * LWE_DIM * 4) as u64);
     assert!(r.rank_failure_log2 <= -40.0 && r.payload_failure_log2 <= -40.0);
     assert_eq!(r.documents, 400);
-    assert!(r.rank_rows <= 64, "the cap was not respected: {}", r.rank_rows);
+    assert!(
+        r.rank_rows <= 64,
+        "the cap was not respected: {}",
+        r.rank_rows
+    );
     fs::remove_dir_all(&b.dir).unwrap();
 }
 

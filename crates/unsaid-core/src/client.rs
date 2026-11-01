@@ -60,17 +60,23 @@ fn check_blob(manifest: &Manifest, name: &str, data: &[u8]) -> Result<(), Search
         .get(name)
         .ok_or_else(|| SearchError::Index(format!("no blob named {name}")))?;
     if info.bytes != data.len() as u64 || info.sha256 != crate::manifest::sha256_hex(data) {
-        return Err(SearchError::Index(format!("{name} does not match the manifest")));
+        return Err(SearchError::Index(format!(
+            "{name} does not match the manifest"
+        )));
     }
     Ok(())
 }
 
 fn words(data: &[u8]) -> Vec<u32> {
-    data.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    data.chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 fn floats(data: &[u8]) -> Vec<f32> {
-    data.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    data.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 /// Serialise words little-endian, the wire format of queries and answers.
@@ -174,7 +180,9 @@ impl Index {
         let all = floats(float_part);
         let owners = words(owner_part);
         if owners.iter().any(|&o| o as usize >= manifest.clusters) {
-            return Err(bad("a routing prototype names a cluster that does not exist"));
+            return Err(bad(
+                "a routing prototype names a cluster that does not exist",
+            ));
         }
         if all.iter().any(|v| !v.is_finite()) {
             return Err(bad("routing data contains a non-finite number"));
@@ -192,7 +200,9 @@ impl Index {
         cluster_start.push(0u32);
         for &size in sizes {
             if size as usize > manifest.rank.rows {
-                return Err(bad("a cluster has more documents than the ranking matrix has rows"));
+                return Err(bad(
+                    "a cluster has more documents than the ranking matrix has rows",
+                ));
             }
             total += u64::from(size);
             if total > u64::from(u32::MAX) {
@@ -205,7 +215,9 @@ impl Index {
         }
         if page_first.first() != Some(&0)
             || page_first.windows(2).any(|w| w[0] >= w[1])
-            || page_first.last().is_some_and(|&l| u64::from(l) >= total.max(1))
+            || page_first
+                .last()
+                .is_some_and(|&l| u64::from(l) >= total.max(1))
         {
             return Err(bad("page boundaries are not increasing"));
         }
@@ -242,7 +254,10 @@ impl Index {
 
     /// The traffic shape the index recommends.
     pub fn default_plan(&self) -> SearchPlan {
-        SearchPlan { probes: self.manifest.probes, pages: self.manifest.pages }
+        SearchPlan {
+            probes: self.manifest.probes,
+            pages: self.manifest.pages,
+        }
     }
 
     /// Prepare one token for a ranking query. This is the slow part of a search and can be
@@ -299,11 +314,15 @@ impl Index {
     ) -> Result<(RankStage, Vec<u8>), SearchError> {
         let m = &self.manifest;
         if tokens.is_empty() || tokens.iter().any(|t| t.len() != m.rank.cols) {
-            return Err(SearchError::Tokens("tokens do not fit the ranking matrix".into()));
+            return Err(SearchError::Tokens(
+                "tokens do not fit the ranking matrix".into(),
+            ));
         }
         let projected = self.project(embedding);
-        let plain: Vec<i32> =
-            projected.iter().map(|v| (v * m.query_scale).round() as i32).collect();
+        let plain: Vec<i32> = projected
+            .iter()
+            .map(|v| (v * m.query_scale).round() as i32)
+            .collect();
         // Route to as many clusters as there are tokens. If the index has fewer clusters than
         // that, the extra queries repeat one, so the traffic keeps its shape.
         let mut clusters = self.route(&projected, tokens.len());
@@ -313,8 +332,11 @@ impl Index {
         let mut request = Vec::with_capacity(tokens.len() * m.rank.cols * 4);
         let mut secrets = Vec::with_capacity(tokens.len());
         for (token, &cluster) in tokens.into_iter().zip(&clusters) {
-            let entries: Vec<(usize, i32)> =
-                plain.iter().enumerate().map(|(i, &v)| (cluster * m.dim + i, v)).collect();
+            let entries: Vec<(usize, i32)> = plain
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (cluster * m.dim + i, v))
+                .collect();
             let (secret, ct) = token.seal(m.rank.log_p, &entries);
             request.extend(ct.iter().flat_map(|v| v.to_le_bytes()));
             secrets.push(secret);
@@ -327,8 +349,11 @@ impl Index {
     }
 
     fn page_range(&self, page: usize) -> (u32, u32) {
-        let end =
-            self.page_first.get(page + 1).copied().unwrap_or(self.manifest.documents as u32);
+        let end = self
+            .page_first
+            .get(page + 1)
+            .copied()
+            .unwrap_or(self.manifest.documents as u32);
         (self.page_first[page], end)
     }
 }
@@ -350,7 +375,9 @@ impl RankStage {
     ) -> Result<(FetchStage, Vec<u8>), SearchError> {
         let m = index.manifest();
         if tokens.is_empty() || tokens.iter().any(|t| t.len() != m.payload.cols) {
-            return Err(SearchError::Tokens("tokens do not fit the document matrix".into()));
+            return Err(SearchError::Tokens(
+                "tokens do not fit the document matrix".into(),
+            ));
         }
         let rows = m.rank.rows;
         if answer.len() != self.secrets.len() * rows * 4 {
@@ -363,22 +390,30 @@ impl RankStage {
         let answer = words(answer);
         let mut ranked: Vec<(u32, i32)> = Vec::new();
         let mut seen = Vec::with_capacity(self.clusters.len());
-        for ((secret, &cluster), part) in
-            self.secrets.iter().zip(&self.clusters).zip(answer.chunks_exact(rows))
+        for ((secret, &cluster), part) in self
+            .secrets
+            .iter()
+            .zip(&self.clusters)
+            .zip(answer.chunks_exact(rows))
         {
-            // Padding rows of a smaller cluster carry nothing, so they need no decryption.
-            let (start, end) = (index.cluster_start[cluster], index.cluster_start[cluster + 1]);
-            let size = (end - start) as usize;
+            // Decrypt every row, including the padding of a smaller cluster. The next request
+            // leaves right after this, so the work must not depend on which cluster this was.
+            let scores = secret.open_signed(m.rank.log_p, part, &index.rank_hint);
             if seen.contains(&cluster) {
                 continue;
             }
             seen.push(cluster);
-            let scores = secret.open_signed(
-                m.rank.log_p,
-                &part[..size],
-                &index.rank_hint[..size * LWE_DIM],
+            let (start, end) = (
+                index.cluster_start[cluster],
+                index.cluster_start[cluster + 1],
             );
-            ranked.extend(scores.iter().enumerate().map(|(row, &s)| (start + row as u32, s)));
+            let size = (end - start) as usize;
+            ranked.extend(
+                scores[..size]
+                    .iter()
+                    .enumerate()
+                    .map(|(row, &s)| (start + row as u32, s)),
+            );
         }
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
@@ -410,7 +445,15 @@ impl RankStage {
             request.extend(ct.iter().flat_map(|v| v.to_le_bytes()));
             secrets.push(secret);
         }
-        Ok((FetchStage { ranked, pages, secrets, limit }, request))
+        Ok((
+            FetchStage {
+                ranked,
+                pages,
+                secrets,
+                limit,
+            },
+            request,
+        ))
     }
 }
 
@@ -435,8 +478,11 @@ impl FetchStage {
         let mut documents: Vec<(u32, Document)> = Vec::new();
         let mut corrupted_pages = 0;
         let mut done: Vec<usize> = Vec::new();
-        for ((secret, &page), part) in
-            self.secrets.iter().zip(&self.pages).zip(answer.chunks_exact(rows))
+        for ((secret, &page), part) in self
+            .secrets
+            .iter()
+            .zip(&self.pages)
+            .zip(answer.chunks_exact(rows))
         {
             if done.contains(&page) {
                 continue;
@@ -452,7 +498,11 @@ impl FetchStage {
             let (first, end) = index.page_range(page);
             match pages::decode(&bytes) {
                 Some(docs) if docs.len() == (end - first) as usize => {
-                    documents.extend(docs.into_iter().enumerate().map(|(i, d)| (first + i as u32, d)));
+                    documents.extend(
+                        docs.into_iter()
+                            .enumerate()
+                            .map(|(i, d)| (first + i as u32, d)),
+                    );
                 }
                 _ => corrupted_pages += 1,
             }
@@ -471,6 +521,9 @@ impl FetchStage {
             })
             .take(self.limit)
             .collect();
-        Ok(Outcome { hits, corrupted_pages })
+        Ok(Outcome {
+            hits,
+            corrupted_pages,
+        })
     }
 }

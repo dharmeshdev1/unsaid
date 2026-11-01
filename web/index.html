@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="A search engine that cannot see what you search for. Your question is encrypted on your device, and the server finds the answer without reading the question or the results.">
+<title>Unsaid: search without saying what you're looking for</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%231b2a8a'/%3E%3Cpath d='M2 2l4 4M10 2l4 4M6 6l4 4M2 14l4-4M10 14l4-4' stroke='%23c8cfee' stroke-width='1.6'/%3E%3C/svg%3E">
+<link rel="preload" href="fonts/besley.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body data-state="loading">
+<div class="split">
+
+<main class="you">
+  <p class="wordmark">Unsaid</p>
+
+  <div class="intro" id="intro">
+    <h1>Search without saying what you're looking for.</h1>
+    <p class="lede">Your question is encrypted on this device. The server finds the answer without being able to read the question or the results.</p>
+  </div>
+
+  <form id="form" class="ask" autocomplete="off">
+    <label class="visually-hidden" for="query">What do you want to know?</label>
+    <input id="query" name="q" type="search" maxlength="500" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="Ask what you wouldn't say out loud" autofocus>
+    <button id="go" type="submit">Search privately</button>
+  </form>
+
+  <div class="examples" id="examples">
+    <span class="examples-label">Try</span>
+    <button type="button" class="example">early signs of dementia</button>
+    <button type="button" class="example">what happens when you go bankrupt</button>
+    <button type="button" class="example">how is HIV passed between people</button>
+    <button type="button" class="example">can alcoholism be cured</button>
+  </div>
+
+  <p class="status" id="status" role="status" aria-live="polite">Getting ready</p>
+  <p class="jump"><a href="#server">See what the server saw</a></p>
+  <div class="meter" id="meter" hidden><div class="meter-fill" id="meter-fill"></div></div>
+  <button type="button" id="start" class="start" hidden>Download the demo</button>
+
+  <section class="results" id="results" aria-label="Search results" hidden>
+    <ol id="hits"></ol>
+    <p class="note">Opening a result leaves this page, so that site sees what you open.</p>
+  </section>
+
+  <section class="explain" id="explain">
+    <h2>How it finds things without reading your question</h2>
+    <ol class="steps">
+      <li>Your device turns the question into numbers and picks a few likely groups of documents, using a public map it downloaded once.</li>
+      <li>It encrypts those numbers with a key used once. The server multiplies its whole index by the result, so every document is touched equally, and returns scores it cannot read.</li>
+      <li>Your device decrypts the scores and asks for the best documents the same way, in the same encrypted form.</li>
+      <li>Your device decrypts the documents and checks them. To the server, every search is the same two requests of noise.</li>
+    </ol>
+    <h2>What this does not hide</h2>
+    <p>The server still sees your IP address, when you search and how often. A VPN or Tor hides those. The lattice encryption has not had an independent audit yet, so please read <a href="https://github.com/dharmeshdev1/unsaid/blob/main/docs/security.md" rel="noopener noreferrer">the security notes</a> before relying on it.</p>
+    <p id="mode-note" class="mode-note"></p>
+    <p class="colophon"><a href="https://github.com/dharmeshdev1/unsaid" rel="noopener noreferrer">Source code on GitHub</a>, Apache 2.0. Article text from <a href="https://simple.wikipedia.org" rel="noopener noreferrer">Simple English Wikipedia</a>, CC BY-SA 4.0.</p>
+  </section>
+</main>
+
+<aside class="server" id="server" aria-label="What the server sees">
+  <h2>What the server sees</h2>
+
+  <figure class="envelope">
+    <canvas id="pattern" aria-hidden="true"></canvas>
+    <p id="pattern-empty" class="pattern-empty">Nothing has reached the server yet.</p>
+    <figcaption id="pattern-caption"></figcaption>
+  </figure>
+
+  <dl class="ledger" id="ledger" hidden>
+    <div><dt>Received</dt><dd id="led-received"></dd></div>
+    <div><dt>Did</dt><dd id="led-did"></dd></div>
+    <div><dt>Sent back</dt><dd id="led-sent"></dd></div>
+    <div id="led-compare-row" hidden><dt>Against your last search</dt><dd id="led-compare"></dd></div>
+  </dl>
+
+  <h3>What each one can write in its log</h3>
+  <div class="logs">
+    <p class="log-name">An ordinary search engine</p>
+    <pre class="log" id="log-plain"><code>your-ip  GET /search?q=<mark id="log-query"></mark></code></pre>
+    <p class="log-name">This server</p>
+    <pre class="log" id="log-unsaid"><code id="log-unsaid-code">your-ip  (no requests yet)</code></pre>
+  </div>
+</aside>
+
+</div>
+</body>
+</html>

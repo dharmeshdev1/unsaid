@@ -136,7 +136,11 @@ mod tests {
 
     #[test]
     fn empty_fields_survive() {
-        let d = Document { title: String::new(), text: String::new(), url: String::new() };
+        let d = Document {
+            title: String::new(),
+            text: String::new(),
+            url: String::new(),
+        };
         let page = encode(&[&d], 64).unwrap();
         assert_eq!(decode(&page).unwrap(), vec![d]);
     }
@@ -165,7 +169,9 @@ mod tests {
         for _ in 0..3000 {
             let mut bad = good.clone();
             for _ in 0..4 {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let at = (state >> 33) as usize % bad.len();
                 bad[at] ^= (state >> 25) as u8 | 1;
             }

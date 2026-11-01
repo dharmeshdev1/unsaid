@@ -72,7 +72,10 @@ impl Prepared {
                 add_row(item, &mut row);
             }
         }
-        Self { secret: Secret(secret), mask }
+        Self {
+            secret: Secret(secret),
+            mask,
+        }
     }
 
     /// Number of entries the ciphertext will have.
@@ -101,7 +104,10 @@ impl Prepared {
 }
 
 fn check_log_p(log_p: u32) -> u32 {
-    assert!((1..LOG_Q).contains(&log_p), "plaintext modulus out of range");
+    assert!(
+        (1..LOG_Q).contains(&log_p),
+        "plaintext modulus out of range"
+    );
     log_p
 }
 
@@ -113,14 +119,16 @@ impl Secret {
     /// If the lengths disagree or `log_p` is outside `1..=31`.
     pub fn open(&self, log_p: u32, answer: &[u32], hint: &[u32]) -> Vec<u32> {
         let shift = LOG_Q - check_log_p(log_p);
-        assert_eq!(hint.len(), answer.len() * LWE_DIM, "hint does not fit this answer");
+        assert_eq!(
+            hint.len(),
+            answer.len() * LWE_DIM,
+            "hint does not fit this answer"
+        );
         let half = 1u32 << (shift - 1);
         answer
             .iter()
             .zip(hint.chunks_exact(LWE_DIM))
-            .map(|(&ans, h)| {
-                ans.wrapping_sub(dot_u32(h, &self.0)).wrapping_add(half) >> shift
-            })
+            .map(|(&ans, h)| ans.wrapping_sub(dot_u32(h, &self.0)).wrapping_add(half) >> shift)
             .collect()
     }
 
@@ -135,7 +143,10 @@ impl Secret {
 
     /// Like [`Secret::open`], for a database of bytes. Requires `log_p == 8`.
     pub fn open_bytes(&self, answer: &[u32], hint: &[u32]) -> Vec<u8> {
-        self.open(8, answer, hint).into_iter().map(|v| v as u8).collect()
+        self.open(8, answer, hint)
+            .into_iter()
+            .map(|v| v as u8)
+            .collect()
     }
 }
 
@@ -167,10 +178,9 @@ mod tests {
         let plain: Vec<(usize, i32)> = (0..16).map(|k| (100 + k, k as i32 - 8)).collect();
         let (secret, ct) = Prepared::new(&a).unwrap().seal(14, &plain);
         let got = secret.open_signed(14, &m.apply(&ct), &hint);
-        for i in 0..rows {
-            let want: i32 =
-                plain.iter().map(|&(j, v)| i32::from(m.row(i)[j]) * v).sum();
-            assert_eq!(got[i], want, "row {i}");
+        for (i, &value) in got.iter().enumerate() {
+            let want: i32 = plain.iter().map(|&(j, v)| i32::from(m.row(i)[j]) * v).sum();
+            assert_eq!(value, want, "row {i}");
         }
     }
 
@@ -214,7 +224,10 @@ mod tests {
         let (_, c1) = Prepared::new(&a).unwrap().seal(8, &[(3, 1)]);
         let (_, c2) = Prepared::new(&a).unwrap().seal(8, &[(3, 1)]);
         let equal = c1.iter().zip(&c2).filter(|(x, y)| x == y).count();
-        assert!(equal < 3, "{equal} entries repeated between two encryptions");
+        assert!(
+            equal < 3,
+            "{equal} entries repeated between two encryptions"
+        );
     }
 
     #[test]

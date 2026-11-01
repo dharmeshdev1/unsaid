@@ -108,9 +108,12 @@ fn automatic_rows(documents: usize, dim: usize, probes: usize) -> usize {
     nearest_power_of_two(optimum, 64, 16384)
 }
 
+/// Same balance for pages, with a floor. A larger page holds several neighbouring documents, so
+/// one fetch returns more of the good results: on BEIR SciFact, four pages of 2048 bytes matched
+/// eight pages of 512 bytes while sending about a third less per search.
 fn automatic_page_bytes(total_compressed: f64, pages: usize) -> usize {
     let optimum = (total_compressed * (pages * 4 * 10) as f64 / (LWE_DIM * 4) as f64).sqrt();
-    nearest_power_of_two(optimum, 512, 16384)
+    nearest_power_of_two(optimum, 2048, 16384)
 }
 
 fn truncate_utf8(text: &str, limit: usize) -> &str {
@@ -122,6 +125,21 @@ fn truncate_utf8(text: &str, limit: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// Shorten a passage for display so that it ends on a whole word and says that it was cut.
+fn shorten_passage(text: &str, limit: usize) -> String {
+    const ELLIPSIS: &str = "\u{2026}";
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let cut = truncate_utf8(text, limit.saturating_sub(ELLIPSIS.len()));
+    let ends_on_word = text[cut.len()..].starts_with(char::is_whitespace);
+    let kept = match cut.rfind(char::is_whitespace) {
+        Some(at) if !ends_on_word && at * 2 > cut.len() => &cut[..at],
+        _ => cut,
+    };
+    format!("{}{ELLIPSIS}", kept.trim_end())
 }
 
 /// Pack documents into pages of `size` bytes, in order. A document too large for a page on
@@ -179,7 +197,10 @@ fn u32_bytes(values: &[u32]) -> Vec<u8> {
 }
 
 fn blob(data: &[u8]) -> BlobInfo {
-    BlobInfo { sha256: sha256_hex(data), bytes: data.len() as u64 }
+    BlobInfo {
+        sha256: sha256_hex(data),
+        bytes: data.len() as u64,
+    }
 }
 
 /// Build an index and write it to `out`.
@@ -234,8 +255,12 @@ pub fn build(
         mean
     } else {
         let step = (n / (clusters * 256)).max(1);
-        let sample: Vec<f32> =
-            z.chunks_exact(dim).step_by(step).flatten().copied().collect();
+        let sample: Vec<f32> = z
+            .chunks_exact(dim)
+            .step_by(step)
+            .flatten()
+            .copied()
+            .collect();
         kmeans(&sample, dim, clusters, 20, options.seed)
     };
     let assign = balanced_assign(&z, dim, &centres, rows_cap);
@@ -278,18 +303,20 @@ pub fn build(
     let mut last_error = String::new();
     for scale in [64f32, 48.0, 32.0, 24.0, 16.0, 12.0, 8.0] {
         let mut data = vec![0i8; rank_rows * rank_cols];
-        data.par_chunks_mut(rank_cols.max(1)).enumerate().for_each(|(row, row_data)| {
-            for c in 0..clusters {
-                if row < sizes[c] as usize {
-                    let doc = order[starts[c] + row] as usize;
-                    let source = &z[doc * dim..(doc + 1) * dim];
-                    let target = &mut row_data[c * dim..(c + 1) * dim];
-                    for (t, &v) in target.iter_mut().zip(source) {
-                        *t = (v * scale).round().clamp(-127.0, 127.0) as i8;
+        data.par_chunks_mut(rank_cols.max(1))
+            .enumerate()
+            .for_each(|(row, row_data)| {
+                for c in 0..clusters {
+                    if row < sizes[c] as usize {
+                        let doc = order[starts[c] + row] as usize;
+                        let source = &z[doc * dim..(doc + 1) * dim];
+                        let target = &mut row_data[c * dim..(c + 1) * dim];
+                        for (t, &v) in target.iter_mut().zip(source) {
+                            *t = (v * scale).round().clamp(-127.0, 127.0) as i8;
+                        }
                     }
                 }
-            }
-        });
+            });
         // Largest possible score, by Cauchy-Schwarz, with rounding of the query included.
         let max_doc_norm = order
             .par_chunks(1024)
@@ -336,7 +363,7 @@ pub fn build(
             let d = &documents[i as usize];
             Document {
                 title: d.title.clone(),
-                text: truncate_utf8(&d.text, options.max_text_bytes).to_owned(),
+                text: shorten_passage(&d.text, options.max_text_bytes),
                 url: d.url.clone(),
             }
         })
@@ -344,10 +371,7 @@ pub fn build(
     let sample_compressed: f64 = {
         let step = (n / 2000).max(1);
         let sample: Vec<&Document> = ordered.iter().step_by(step).collect();
-        let chunks: Vec<usize> = sample
-            .chunks(8)
-            .map(|c| miniz_estimate(c))
-            .collect();
+        let chunks: Vec<usize> = sample.chunks(8).map(miniz_estimate).collect();
         chunks.iter().sum::<usize>() as f64 * step as f64
     };
     let page_bytes = options
@@ -378,14 +402,21 @@ pub fn build(
 
     // A page is a column of the document matrix.
     let mut payload = vec![0i8; page_bytes * page_count];
-    payload.par_chunks_mut(page_count).enumerate().for_each(|(row, values)| {
-        for (v, page) in values.iter_mut().zip(&page_data) {
-            *v = page[row] as i8;
-        }
-    });
+    payload
+        .par_chunks_mut(page_count)
+        .enumerate()
+        .for_each(|(row, values)| {
+            for (v, page) in values.iter_mut().zip(&page_data) {
+                *v = page[row] as i8;
+            }
+        });
     drop(page_data);
     let payload_matrix = Matrix::new(page_bytes, page_count, payload);
-    let payload_failure = storable(failure_log2(8, payload_matrix.max_row_norm_sq(), page_bytes));
+    let payload_failure = storable(failure_log2(
+        8,
+        payload_matrix.max_row_norm_sq(),
+        page_bytes,
+    ));
     if payload_failure > MAX_FAILURE_LOG2 {
         return Err(format!(
             "the document matrix has failure bound 2^{payload_failure:.1}, over the limit of \
@@ -408,7 +439,10 @@ pub fn build(
     blobs.insert("routing".to_owned(), blob(&routing));
     blobs.insert("layout".to_owned(), blob(&layout));
     blobs.insert("page_digests".to_owned(), blob(&page_digests));
-    let placeholder = BlobInfo { sha256: String::new(), bytes: 0 };
+    let placeholder = BlobInfo {
+        sha256: String::new(),
+        bytes: 0,
+    };
     blobs.insert("rank_hint".to_owned(), placeholder.clone());
     blobs.insert("payload_hint".to_owned(), placeholder);
 
@@ -443,8 +477,12 @@ pub fn build(
 
     let rank_hint = u32_bytes(&rank_matrix.hint(&manifest.rank_matrix()));
     let payload_hint = u32_bytes(&payload_matrix.hint(&manifest.payload_matrix()));
-    manifest.blobs.insert("rank_hint".to_owned(), blob(&rank_hint));
-    manifest.blobs.insert("payload_hint".to_owned(), blob(&payload_hint));
+    manifest
+        .blobs
+        .insert("rank_hint".to_owned(), blob(&rank_hint));
+    manifest
+        .blobs
+        .insert("payload_hint".to_owned(), blob(&payload_hint));
     manifest.validate().map_err(|e| e.to_string())?;
 
     fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -543,10 +581,16 @@ mod tests {
                 char::from(b'a' + ((state >> 33) % 26) as u8)
             })
             .collect();
-        let big = Document { title: "Huge".into(), text: noisy, url: "u".into() };
+        let big = Document {
+            title: "Huge".into(),
+            text: noisy,
+            url: "u".into(),
+        };
         let pages_out = paginate(&[doc(1, 3), big, doc(2, 3)], 512);
-        let all: Vec<Document> =
-            pages_out.iter().flat_map(|(p, _)| pages::decode(p).unwrap()).collect();
+        let all: Vec<Document> = pages_out
+            .iter()
+            .flat_map(|(p, _)| pages::decode(p).unwrap())
+            .collect();
         assert_eq!(all.len(), 3);
         assert_eq!(all[1].title, "Huge");
         assert!(all[1].text.len() < 4000 && !all[1].text.is_empty());
@@ -554,7 +598,11 @@ mod tests {
 
     #[test]
     fn shortening_respects_character_boundaries() {
-        let d = Document { title: "t".into(), text: "日本語🙂".repeat(400), url: String::new() };
+        let d = Document {
+            title: "t".into(),
+            text: "日本語🙂".repeat(400),
+            url: String::new(),
+        };
         let pages_out = paginate(&[d], 256);
         assert!(pages::decode(&pages_out[0].0).is_some());
     }
@@ -568,7 +616,11 @@ mod tests {
                 char::from(b'a' + ((state >> 33) % 26) as u8)
             })
             .collect();
-        let d = Document { title, text: String::new(), url: "x".repeat(50) };
+        let d = Document {
+            title,
+            text: String::new(),
+            url: "x".repeat(50),
+        };
         let pages_out = paginate(&[d], 128);
         assert_eq!(pages_out.len(), 1);
     }
@@ -578,7 +630,19 @@ mod tests {
         assert!(automatic_rows(1_000_000, 256, 8) > automatic_rows(10_000, 256, 8));
         assert!(automatic_rows(10, 256, 8) >= 64);
         assert!(automatic_page_bytes(1e9, 4) > automatic_page_bytes(1e6, 4));
-        assert_eq!(automatic_page_bytes(1.0, 4), 512);
+        assert_eq!(automatic_page_bytes(1.0, 4), 2048);
+    }
+
+    #[test]
+    fn passages_are_shortened_on_a_word_boundary_within_the_limit() {
+        assert_eq!(shorten_passage("short enough", 100), "short enough");
+        let cut = shorten_passage("one two three four five six seven", 16);
+        assert_eq!(cut, "one two three\u{2026}");
+        assert!(cut.len() <= 16);
+        // One enormous word is cut anyway rather than losing the whole passage.
+        let long = "x".repeat(50);
+        let cut = shorten_passage(&long, 20);
+        assert!(cut.len() <= 20 && cut.ends_with('\u{2026}') && cut.starts_with("xxx"));
     }
 
     #[test]

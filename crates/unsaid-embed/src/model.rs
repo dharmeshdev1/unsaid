@@ -109,17 +109,25 @@ pub fn pack_safetensors(
     let config: serde_json::Value =
         serde_json::from_str(config_json).map_err(|e| err(format!("config.json: {e}")))?;
     let number = |key: &str| {
-        config[key].as_u64().map(|v| v as usize).ok_or_else(|| err(format!("config lacks {key}")))
+        config[key]
+            .as_u64()
+            .map(|v| v as usize)
+            .ok_or_else(|| err(format!("config lacks {key}")))
     };
-    let (hidden, layers, heads) =
-        (number("hidden_size")?, number("num_hidden_layers")?, number("num_attention_heads")?);
+    let (hidden, layers, heads) = (
+        number("hidden_size")?,
+        number("num_hidden_layers")?,
+        number("num_attention_heads")?,
+    );
     let lowercase = config["do_lower_case"].as_bool().unwrap_or(true);
 
     if safetensors.len() < 8 {
         return Err(err("safetensors file is truncated"));
     }
     let header_len = u64::from_le_bytes(safetensors[..8].try_into().unwrap()) as usize;
-    let body_start = header_len.checked_add(8).filter(|&e| e <= safetensors.len());
+    let body_start = header_len
+        .checked_add(8)
+        .filter(|&e| e <= safetensors.len());
     let body_start = body_start.ok_or_else(|| err("safetensors header is truncated"))?;
     let meta: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&safetensors[8..body_start])
@@ -142,23 +150,35 @@ pub fn pack_safetensors(
             .iter()
             .map(|v| v.as_u64().unwrap_or(0) as usize)
             .collect();
-        let range = info["data_offsets"].as_array().ok_or_else(|| err("tensor without offsets"))?;
+        let range = info["data_offsets"]
+            .as_array()
+            .ok_or_else(|| err("tensor without offsets"))?;
         let (a, b) = (
             range[0].as_u64().unwrap_or(0) as usize,
             range[1].as_u64().unwrap_or(0) as usize,
         );
-        let raw = body.get(a..b).ok_or_else(|| err("tensor offsets are out of range"))?;
+        let raw = body
+            .get(a..b)
+            .ok_or_else(|| err("tensor offsets are out of range"))?;
         let values: Vec<f32> = raw
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         // One-dimensional tensors (biases and norm parameters) are few and sensitive.
-        let format = if shape.len() >= 2 { options.weights } else { WeightFormat::F32 };
+        let format = if shape.len() >= 2 {
+            options.weights
+        } else {
+            WeightFormat::F32
+        };
         match format {
             WeightFormat::F32 => data.extend(values.iter().flat_map(|v| v.to_le_bytes())),
             WeightFormat::Q16 | WeightFormat::Q8 => {
                 let row_len = values.len() / shape[0].max(1);
-                let top = if format == WeightFormat::Q16 { 32767.0 } else { 127.0 };
+                let top = if format == WeightFormat::Q16 {
+                    32767.0
+                } else {
+                    127.0
+                };
                 let scales: Vec<f32> = values
                     .chunks_exact(row_len.max(1))
                     .map(|row| row.iter().fold(0f32, |m, v| m.max(v.abs())).max(1e-12) / top)
@@ -176,7 +196,11 @@ pub fn pack_safetensors(
                 }
             }
         }
-        tensors.push(TensorInfo { name, shape, format });
+        tensors.push(TensorInfo {
+            name,
+            shape,
+            format,
+        });
     }
 
     let header = Header {
@@ -237,7 +261,12 @@ impl Tensors<'_> {
                 weight[i * outputs + o] = w[o * inputs + i];
             }
         }
-        Ok(Linear { weight, bias, inputs, outputs })
+        Ok(Linear {
+            weight,
+            bias,
+            inputs,
+            outputs,
+        })
     }
 
     fn norm(&self, prefix: &str) -> Result<LayerNorm, ModelError> {
@@ -249,7 +278,9 @@ impl Tensors<'_> {
 }
 
 fn floats(raw: &[u8]) -> Vec<f32> {
-    raw.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    raw.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 fn decode(info: &TensorInfo, raw: &[u8]) -> Vec<f32> {
@@ -300,7 +331,10 @@ impl Embedder {
         let header_end = header_end.ok_or_else(|| err("model header is truncated"))?;
         let header: Header = serde_json::from_slice(&file[8..header_end])
             .map_err(|e| err(format!("model header: {e}")))?;
-        let t = Tensors { infos: &header.tensors, data: &file[header_end..] };
+        let t = Tensors {
+            infos: &header.tensors,
+            data: &file[header_end..],
+        };
 
         let tokenizer = Tokenizer::from_vocab(&header.vocab, header.lowercase)
             .ok_or_else(|| err("vocabulary lacks the special tokens"))?;
@@ -322,11 +356,48 @@ impl Embedder {
             });
         }
         let (token_types, _) = t.get("embeddings.token_type_embeddings.weight")?;
+        let (word, word_shape) = t.get("embeddings.word_embeddings.weight")?;
+        let word_rows = word_shape.first().copied().unwrap_or(0);
+        let (position, position_shape) = t.get("embeddings.position_embeddings.weight")?;
+        let position_rows = position_shape.first().copied().unwrap_or(0);
+        // A hostile model file must fail here and not panic later while encoding.
+        let h = header.hidden;
+        let shapes_ok = word.len() == word_rows * h
+            && position.len() == position_rows * h
+            && word_rows >= header.vocab.len()
+            && position_rows >= header.max_tokens
+            && header.max_tokens >= 2
+            && token_types.len() >= h
+            && layers.iter().all(|l| {
+                let square = |x: &Linear| x.inputs == h && x.outputs == h;
+                let fits = |x: &Linear| {
+                    x.weight.len() == x.inputs * x.outputs && x.bias.len() == x.outputs
+                };
+                let norm = |n: &LayerNorm| n.gamma.len() == h && n.beta.len() == h;
+                square(&l.query)
+                    && square(&l.key)
+                    && square(&l.value)
+                    && square(&l.attn_out)
+                    && l.ffn_in.inputs == h
+                    && l.ffn_out.inputs == l.ffn_in.outputs
+                    && l.ffn_out.outputs == h
+                    && fits(&l.query)
+                    && fits(&l.key)
+                    && fits(&l.value)
+                    && fits(&l.attn_out)
+                    && fits(&l.ffn_in)
+                    && fits(&l.ffn_out)
+                    && norm(&l.attn_norm)
+                    && norm(&l.ffn_norm)
+            });
+        if !shapes_ok {
+            return Err(err("tensor shapes do not fit the architecture"));
+        }
         let bert = Bert {
             hidden: header.hidden,
             heads: header.heads,
-            word: t.get("embeddings.word_embeddings.weight")?.0,
-            position: t.get("embeddings.position_embeddings.weight")?.0,
+            word,
+            position,
             token_type: token_types[..header.hidden].to_vec(),
             embed_norm: t.norm("embeddings.LayerNorm")?,
             layers,
@@ -354,14 +425,18 @@ impl Embedder {
 
     /// Embed a search query.
     pub fn embed_query(&self, text: &str) -> Vec<f32> {
-        let ids = self.tokenizer.encode(&format!("{}{text}", self.query_prefix), self.max_tokens);
+        let ids = self
+            .tokenizer
+            .encode(&format!("{}{text}", self.query_prefix), self.max_tokens);
         self.bert.encode(&ids)
     }
 
     /// Embed a document, keeping at most `max_tokens` tokens of it.
     pub fn embed_document(&self, text: &str, max_tokens: usize) -> Vec<f32> {
         let limit = max_tokens.min(self.max_tokens);
-        let ids = self.tokenizer.encode(&format!("{}{text}", self.document_prefix), limit);
+        let ids = self
+            .tokenizer
+            .encode(&format!("{}{text}", self.document_prefix), limit);
         self.bert.encode(&ids)
     }
 
@@ -377,7 +452,12 @@ mod tests {
 
     #[test]
     fn garbage_is_refused_without_panicking() {
-        for bytes in [&b""[..], &b"USM2"[..], &b"NOPE12345678"[..], &b"USM2\xff\xff\xff\xffab"[..]] {
+        for bytes in [
+            &b""[..],
+            &b"USM2"[..],
+            &b"NOPE12345678"[..],
+            &b"USM2\xff\xff\xff\xffab"[..],
+        ] {
             assert!(Embedder::load(bytes).is_err());
         }
     }

@@ -11,7 +11,10 @@ use crate::params::{LOG_Q, SIGMA};
 /// contains at least one decryption error, for a matrix whose largest squared row norm is
 /// `max_row_norm_sq`.
 pub fn failure_log2(log_p: u32, max_row_norm_sq: u64, rows: usize) -> f64 {
-    assert!((1..LOG_Q).contains(&log_p), "plaintext modulus out of range");
+    assert!(
+        (1..LOG_Q).contains(&log_p),
+        "plaintext modulus out of range"
+    );
     if max_row_norm_sq == 0 || rows == 0 {
         return f64::NEG_INFINITY;
     }
@@ -87,12 +90,18 @@ mod tests {
             // log_p = 31 leaves one bit of rounding, so recover raw residues instead.
             samples.extend(residues(&secret, &ans, &hint));
         }
-        let var =
-            samples.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / samples.len() as f64;
+        let var = samples
+            .iter()
+            .map(|&x| f64::from(x) * f64::from(x))
+            .sum::<f64>()
+            / samples.len() as f64;
         let predicted = SIGMA * SIGMA * norm as f64;
         let ratio = var / predicted;
         // Rows are close to the maximum norm, and the sample has 768 entries.
-        assert!((0.75..1.25).contains(&ratio), "measured / predicted = {ratio:.3}");
+        assert!(
+            (0.75..1.25).contains(&ratio),
+            "measured / predicted = {ratio:.3}"
+        );
         // And no entry anywhere near the half step for p = 2^14.
         let half_step = 2f64.powi(32 - 14 - 1);
         assert!(samples.iter().all(|&x| f64::from(x).abs() < half_step));
@@ -101,6 +110,10 @@ mod tests {
     fn residues(secret: &crate::query::Secret, ans: &[u32], hint: &[u32]) -> Vec<i32> {
         // Opening with two different moduli reconstructs the residue without exposing the
         // secret: value modulo 2^31 at rounding precision is the residue divided by 2.
-        secret.open(31, ans, hint).into_iter().map(|v| ((v << 1) as i32)).collect()
+        secret
+            .open(31, ans, hint)
+            .into_iter()
+            .map(|v| (v << 1) as i32)
+            .collect()
     }
 }

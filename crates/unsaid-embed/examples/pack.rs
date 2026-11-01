@@ -11,7 +11,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vocab = std::fs::read_to_string(format!("{dir}/vocab.txt"))?;
     let options = PackOptions {
         name: name.clone(),
-        pooling: if pooling == "cls" { Pooling::Cls } else { Pooling::Mean },
+        pooling: if pooling == "cls" {
+            Pooling::Cls
+        } else {
+            Pooling::Mean
+        },
         query_prefix: args.get(6).cloned().unwrap_or_default(),
         document_prefix: String::new(),
         max_tokens: 512,

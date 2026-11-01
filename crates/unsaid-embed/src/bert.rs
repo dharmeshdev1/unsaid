@@ -28,9 +28,9 @@ pub(crate) struct Linear {
 impl Linear {
     /// Apply to `tokens` row-major input rows, overwriting `y`.
     fn forward(&self, x: &[f32], y: &mut [f32]) {
-        y.copy_from_slice(&self.bias.repeat(y.len() / self.outputs));
         let n = self.outputs;
         for (x_row, y_row) in x.chunks_exact(self.inputs).zip(y.chunks_exact_mut(n)) {
+            y_row.copy_from_slice(&self.bias);
             // Four weight rows at a time touch each output once per four multiplies, which
             // nearly doubles throughput compared with one row at a time.
             let mut xs = x_row.chunks_exact(4);
@@ -274,9 +274,9 @@ mod tests {
         let mut x = [-10.0f32, -1.0, 0.0, 1.0, 10.0];
         gelu(&mut x);
         assert!(x[0].abs() < 1e-5);
-        assert!((x[1] - (-0.158_655_25)).abs() < 1e-5);
+        assert!((x[1] - (-0.158_655_3)).abs() < 1e-5);
         assert_eq!(x[2], 0.0);
-        assert!((x[3] - 0.841_344_75).abs() < 1e-5);
+        assert!((x[3] - 0.841_344_8).abs() < 1e-5);
         assert!((x[4] - 10.0).abs() < 1e-4);
     }
 
@@ -304,7 +304,10 @@ mod tests {
 
     #[test]
     fn layer_norm_produces_zero_mean_unit_variance_before_scaling() {
-        let n = LayerNorm { gamma: vec![1.0; 4], beta: vec![0.0; 4] };
+        let n = LayerNorm {
+            gamma: vec![1.0; 4],
+            beta: vec![0.0; 4],
+        };
         let mut x = [1.0, 2.0, 3.0, 4.0];
         n.apply(&mut x);
         let mean: f32 = x.iter().sum::<f32>() / 4.0;

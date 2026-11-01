@@ -1,0 +1,35 @@
+[package]
+name = "unsaid"
+description = "Search without saying what you're looking for. A private search engine in one binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["privacy", "search", "homomorphic-encryption", "pir", "post-quantum"]
+categories = ["command-line-utilities", "cryptography", "text-processing"]
+
+[[bin]]
+name = "unsaid"
+path = "src/main.rs"
+
+[dependencies]
+unsaid-build.workspace = true
+unsaid-core.workspace = true
+unsaid-embed.workspace = true
+unsaid-lwe.workspace = true
+unsaid-server.workspace = true
+clap = { version = "4", features = ["derive"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "macros"] }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq = "2"
+
+[lints]
+workspace = true

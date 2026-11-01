@@ -1,0 +1,21 @@
+[package]
+name = "unsaid-server"
+description = "The Unsaid private search server: it multiplies matrices by ciphertext and learns nothing about what was searched."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+unsaid-core.workspace = true
+unsaid-lwe.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "macros"] }
+tower-http = { version = "0.6", features = ["cors"] }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

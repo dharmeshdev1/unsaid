@@ -8,4 +8,3 @@ __pycache__/
 /index/
 /dist/
 *.log
-web/pkg/

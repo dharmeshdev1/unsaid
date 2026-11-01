@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "unsaid": {
+      "command": "unsaid",
+      "args": ["mcp", "--server", "http://127.0.0.1:8377"]
+    }
+  }
+}

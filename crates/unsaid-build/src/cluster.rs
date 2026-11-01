@@ -51,9 +51,12 @@ fn seed_centres(data: &[f32], dim: usize, k: usize, rng: &mut Drbg) -> Vec<f32> 
         let start = centres.len();
         centres.extend_from_slice(&data[chosen * dim..(chosen + 1) * dim]);
         let centre = &centres[start..];
-        distance.par_iter_mut().zip(data.par_chunks(dim)).for_each(|(d, p)| {
-            *d = d.min(f64::from(1.0 - dot(p, centre)).max(0.0));
-        });
+        distance
+            .par_iter_mut()
+            .zip(data.par_chunks(dim))
+            .for_each(|(d, p)| {
+                *d = d.min(f64::from(1.0 - dot(p, centre)).max(0.0));
+            });
     }
     centres
 }
@@ -71,6 +74,9 @@ fn nearest(point: &[f32], centres: &[f32], dim: usize) -> (usize, f32) {
     best
 }
 
+/// One chunk's running totals in a k-means pass: centre sums, counts, and assignments.
+type ChunkTotals = (Vec<f64>, Vec<u32>, Vec<(f32, u32)>);
+
 /// Spherical k-means on unit vectors. Returns `k` unit centres, row-major.
 ///
 /// # Panics
@@ -82,7 +88,7 @@ pub fn kmeans(data: &[f32], dim: usize, k: usize, iterations: usize, seed: u64) 
     let mut centres = seed_centres(data, dim, k, &mut rng);
     for _ in 0..iterations {
         // Fixed-size chunks summed in order keep this independent of thread count.
-        let parts: Vec<(Vec<f64>, Vec<u32>, Vec<(f32, u32)>)> = data
+        let parts: Vec<ChunkTotals> = data
             .par_chunks(dim * 1024)
             .enumerate()
             .map(|(chunk_index, chunk)| {
@@ -152,7 +158,9 @@ pub fn balanced_assign(data: &[f32], dim: usize, centres: &[f32], capacity: usiz
             let scores: Vec<f32> = centres.chunks_exact(dim).map(|c| dot(point, c)).collect();
             let mut order: Vec<u32> = (0..k as u32).collect();
             let by_score = |a: &u32, b: &u32| {
-                scores[*b as usize].total_cmp(&scores[*a as usize]).then(a.cmp(b))
+                scores[*b as usize]
+                    .total_cmp(&scores[*a as usize])
+                    .then(a.cmp(b))
             };
             if keep < k {
                 order.select_nth_unstable_by(keep - 1, by_score);
@@ -169,13 +177,20 @@ pub fn balanced_assign(data: &[f32], dim: usize, centres: &[f32], capacity: usiz
         .collect();
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_by(|&a, &b| {
-        prefs[b as usize].0.total_cmp(&prefs[a as usize].0).then(a.cmp(&b))
+        prefs[b as usize]
+            .0
+            .total_cmp(&prefs[a as usize].0)
+            .then(a.cmp(&b))
     });
     let mut counts = vec![0usize; k];
     let mut assign = vec![0u32; n];
     for i in order {
         let i = i as usize;
-        let choice = prefs[i].1.iter().copied().find(|&c| counts[c as usize] < capacity);
+        let choice = prefs[i]
+            .1
+            .iter()
+            .copied()
+            .find(|&c| counts[c as usize] < capacity);
         let c = choice.unwrap_or_else(|| {
             // Every preferred centre is full, so take the best centre that has room.
             let point = &data[i * dim..(i + 1) * dim];
@@ -276,11 +291,16 @@ mod tests {
         let (groups, per, dim) = (5, 40, 8);
         let data = blobs(groups, per, dim, 1);
         let centres = kmeans(&data, dim, groups, 20, 7);
-        let labels: Vec<usize> =
-            data.chunks_exact(dim).map(|p| nearest(p, &centres, dim).0).collect();
+        let labels: Vec<usize> = data
+            .chunks_exact(dim)
+            .map(|p| nearest(p, &centres, dim).0)
+            .collect();
         for g in 0..groups {
             let first = labels[g * per];
-            assert!(labels[g * per..(g + 1) * per].iter().all(|&l| l == first), "group {g} split");
+            assert!(
+                labels[g * per..(g + 1) * per].iter().all(|&l| l == first),
+                "group {g} split"
+            );
         }
         let mut distinct: Vec<usize> = (0..groups).map(|g| labels[g * per]).collect();
         distinct.sort_unstable();
@@ -303,14 +323,17 @@ mod tests {
         let a = kmeans(&data, 16, 6, 5, 11);
         let b = kmeans(&data, 16, 6, 5, 11);
         assert_eq!(a, b);
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
         let c = pool.install(|| kmeans(&data, 16, 6, 5, 11));
         assert_eq!(a, c);
     }
 
     #[test]
     fn identical_points_do_not_break_clustering() {
-        let data = vec![1.0f32, 0.0].repeat(20);
+        let data = [1.0f32, 0.0].repeat(20);
         let centres = kmeans(&data, 2, 4, 5, 1);
         assert!(centres.iter().all(|v| v.is_finite()));
     }

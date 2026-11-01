@@ -35,10 +35,19 @@ fn cosine(a: &[f32], b: &[f64]) -> f64 {
 fn check(name: &str) {
     let Some(model) = load(name) else { return };
     let all = fixtures();
-    let texts: Vec<&str> = all["texts"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+    let texts: Vec<&str> = all["texts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
     let reference = &all["models"][name];
     let numbers = |v: &serde_json::Value| -> Vec<f64> {
-        v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect()
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect()
     };
     for (i, text) in texts.iter().enumerate() {
         let want: Vec<u32> = reference["ids"][i]
@@ -47,7 +56,11 @@ fn check(name: &str) {
             .iter()
             .map(|x| x.as_u64().unwrap() as u32)
             .collect();
-        assert_eq!(model.tokenize(text, 128), want, "tokens differ for {text:?}");
+        assert_eq!(
+            model.tokenize(text, 128),
+            want,
+            "tokens differ for {text:?}"
+        );
 
         let doc = model.embed_document(text, 128);
         let c = cosine(&doc, &numbers(&reference["doc"][i]));
@@ -74,16 +87,26 @@ fn matches_the_reference_for_bge_small_en_v1_5() {
 
 #[test]
 fn related_text_scores_higher_than_unrelated_text() {
-    let Some(model) = load("all-MiniLM-L6-v2") else { return };
+    let Some(model) = load("all-MiniLM-L6-v2") else {
+        return;
+    };
     let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
     let q = model.embed_query("symptoms of the flu");
-    let related = model.embed_document("Influenza causes fever, chills, cough and muscle aches.", 128);
+    let related = model.embed_document(
+        "Influenza causes fever, chills, cough and muscle aches.",
+        128,
+    );
     let unrelated = model.embed_document("The stock exchange closed higher on Tuesday.", 128);
     assert!(dot(&q, &related) > dot(&q, &unrelated) + 0.2);
 }
 
 #[test]
 fn embeddings_are_deterministic() {
-    let Some(model) = load("all-MiniLM-L6-v2") else { return };
-    assert_eq!(model.embed_query("same input"), model.embed_query("same input"));
+    let Some(model) = load("all-MiniLM-L6-v2") else {
+        return;
+    };
+    assert_eq!(
+        model.embed_query("same input"),
+        model.embed_query("same input")
+    );
 }
