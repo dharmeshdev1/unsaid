@@ -1,0 +1,57 @@
+{
+  "format": "unsaid-index-1",
+  "name": "Simple English Wikipedia, 20,000 articles",
+  "documents": 20000,
+  "model": "all-MiniLM-L6-v2",
+  "model_dim": 384,
+  "dim": 256,
+  "clusters": 49,
+  "prototypes": 1568,
+  "doc_scale": 64.0,
+  "query_scale": 64.0,
+  "probes": 8,
+  "pages": 4,
+  "rank": {
+    "rows": 512,
+    "cols": 12544,
+    "log_p": 14,
+    "failure_log2": -1483.3100980668835
+  },
+  "payload": {
+    "rows": 2048,
+    "cols": 3114,
+    "log_p": 8,
+    "failure_log2": -32079.493924041137
+  },
+  "lwe": {
+    "n": 1280,
+    "log_q": 32,
+    "sigma": 6.4
+  },
+  "blobs": {
+    "layout": {
+      "sha256": "1106d4238bbb50e44c569bea2097bbc1b1afdb683a6bb4634835e2f6545c5d99",
+      "bytes": 12652
+    },
+    "model": {
+      "sha256": "b3fd40c159f2dca22fdeba20ed584e64ed980208be96486068f3789d8c32b51f",
+      "bytes": 23165735
+    },
+    "page_digests": {
+      "sha256": "f80012581ebe3c4a712e8aa5d7802691d2d4eab6934828f5f9c3597455ff4b25",
+      "bytes": 49824
+    },
+    "payload_hint": {
+      "sha256": "76bbe137f97c9f4319dcf75e6e3c743774c3e6fefec58da53f8ee6355540fd54",
+      "bytes": 10485760
+    },
+    "rank_hint": {
+      "sha256": "48204f02229424489b5eacff27947d0543ca1c5f0a89bcd0357a562c05f98ba0",
+      "bytes": 2621440
+    },
+    "routing": {
+      "sha256": "104076ca0c49e04a179eff82c378fb4e57b7b1a192a9b94313d4d93fd22abced",
+      "bytes": 2006656
+    }
+  }
+}
