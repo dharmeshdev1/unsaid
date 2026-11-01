@@ -48,6 +48,27 @@ jobs:
           targets: wasm32-unknown-unknown
       - run: cargo build --release -p unsaid-wasm --target wasm32-unknown-unknown
 
+  interop:
+    name: Python client against the Rust server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - run: cargo build --release -p unsaid
+      - name: Search through an independent client
+        run: |
+          ./target/release/unsaid demo --port 8377 &
+          for attempt in $(seq 1 150); do
+            curl -fs http://127.0.0.1:8377/v1/health && break
+            sleep 2
+          done
+          python tutorial/3_real_client.py "how do vaccines work" --unsaid ./target/release/unsaid
+          ./target/release/unsaid search "how do vaccines work" --trace
+
   docker:
     name: Docker image builds
     runs-on: ubuntu-latest

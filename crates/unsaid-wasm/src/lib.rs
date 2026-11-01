@@ -7,9 +7,9 @@
 use std::collections::VecDeque;
 
 use unsaid_core::Index;
-use unsaid_core::client::{FetchStage, IndexFiles, RankStage, SearchPlan};
+use unsaid_core::client::{FetchStage, IndexFiles, RankStage, ScoredStage, SearchPlan};
 use unsaid_core::manifest::sha256_hex;
-use unsaid_embed::Embedder;
+use unsaid_embed::{Embedder, is_known_model};
 use unsaid_lwe::{Matrix, Prepared};
 use wasm_bindgen::prelude::*;
 
@@ -26,12 +26,15 @@ pub struct Engine {
     rank_tokens: VecDeque<Prepared>,
     fetch_tokens: VecDeque<Prepared>,
     rank_stage: Option<RankStage>,
+    scored_stage: Option<ScoredStage>,
     fetch_stage: Option<FetchStage>,
 }
 
 #[wasm_bindgen]
 impl Engine {
-    /// Verify every public file against the manifest and load the model.
+    /// Verify every public file against the manifest and load the model. Unless
+    /// `allow_unknown_model` is set, the model must be on the trusted list. A page may set it when
+    /// the server supplying the model also supplied the page, which already had to be trusted.
     #[wasm_bindgen(constructor)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -42,6 +45,7 @@ impl Engine {
         rank_hint: &[u8],
         payload_hint: &[u8],
         model: &[u8],
+        allow_unknown_model: bool,
     ) -> Result<Engine, JsError> {
         let files = IndexFiles {
             routing,
@@ -51,15 +55,19 @@ impl Engine {
             payload_hint,
         };
         let index = Index::open(manifest, &files).map_err(fail)?;
-        let expected = index
-            .manifest()
-            .blobs
-            .get("model")
-            .map(|b| b.sha256.as_str());
-        if expected != Some(sha256_hex(model).as_str()) {
+        let hash = sha256_hex(model);
+        if index.manifest().blobs["model"].sha256 != hash {
             return Err(JsError::new("the model does not match the manifest"));
         }
+        if !allow_unknown_model && !is_known_model(&hash) {
+            return Err(JsError::new(
+                "this index uses a model this page does not trust",
+            ));
+        }
         let embedder = Embedder::load(model).map_err(fail)?;
+        if embedder.dim() != index.manifest().model_dim {
+            return Err(JsError::new("the model's vectors do not fit this index"));
+        }
         let plan = index.default_plan();
         Ok(Self {
             index,
@@ -68,6 +76,7 @@ impl Engine {
             rank_tokens: VecDeque::new(),
             fetch_tokens: VecDeque::new(),
             rank_stage: None,
+            scored_stage: None,
             fetch_stage: None,
         })
     }
@@ -84,7 +93,7 @@ impl Engine {
 
     /// Identifier of the index, which anyone can compare out of band.
     pub fn index_id(&self) -> String {
-        self.index.manifest().index_id()
+        self.index.id().to_owned()
     }
 
     /// Searches that could start right now without waiting for encryption.
@@ -94,11 +103,13 @@ impl Engine {
 
     /// Do the slow part of one future search ahead of time.
     pub fn prepare_one(&mut self) -> Result<(), JsError> {
-        for _ in 0..self.plan.probes {
+        // A search that failed halfway used up only one kind of token, so top up each separately.
+        let searches = self.prepared_searches() + 1;
+        while self.rank_tokens.len() < searches * self.plan.probes {
             self.rank_tokens
                 .push_back(self.index.prepare_rank().map_err(fail)?);
         }
-        for _ in 0..self.plan.pages {
+        while self.fetch_tokens.len() < searches * self.plan.pages {
             self.fetch_tokens
                 .push_back(self.index.prepare_fetch().map_err(fail)?);
         }
@@ -121,16 +132,25 @@ impl Engine {
         Ok(request)
     }
 
-    /// Decrypt the scores. Returns the bytes to send to the document endpoint.
-    pub fn receive_rank(&mut self, answer: &[u8], limit: usize) -> Result<Vec<u8>, JsError> {
+    /// Decrypt the scores. This takes the same time for every search, so its duration can be used
+    /// to hide how long `choose_pages` takes.
+    pub fn decrypt_rank(&mut self, answer: &[u8]) -> Result<(), JsError> {
         let stage = self
             .rank_stage
             .take()
             .ok_or_else(|| JsError::new("no search in progress"))?;
+        self.scored_stage = Some(stage.decrypt(&self.index, answer).map_err(fail)?);
+        Ok(())
+    }
+
+    /// Choose the pages to fetch. Returns the bytes to send to the document endpoint.
+    pub fn choose_pages(&mut self, limit: usize) -> Result<Vec<u8>, JsError> {
+        let stage = self
+            .scored_stage
+            .take()
+            .ok_or_else(|| JsError::new("no search in progress"))?;
         let tokens: Vec<Prepared> = self.fetch_tokens.drain(..self.plan.pages).collect();
-        let (stage, request) = stage
-            .receive(&self.index, answer, tokens, limit)
-            .map_err(fail)?;
+        let (stage, request) = stage.choose(&self.index, tokens, limit).map_err(fail)?;
         self.fetch_stage = Some(stage);
         Ok(request)
     }
@@ -143,6 +163,13 @@ impl Engine {
             .ok_or_else(|| JsError::new("no search in progress"))?;
         let outcome = stage.receive(&self.index, answer).map_err(fail)?;
         serde_json::to_string(&outcome).map_err(fail)
+    }
+
+    /// Forget a search that will not finish, wiping its secrets.
+    pub fn abort(&mut self) {
+        self.rank_stage = None;
+        self.scored_stage = None;
+        self.fetch_stage = None;
     }
 
     /// Clusters scored per search.

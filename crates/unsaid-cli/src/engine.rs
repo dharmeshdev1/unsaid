@@ -1,16 +1,25 @@
 //! A complete private search client: embed locally, encrypt, talk to a server, decrypt.
 
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
 use unsaid_core::client::{IndexFiles, SearchPlan};
+use unsaid_core::manifest::{BlobInfo, MatrixInfo, index_id, sha256_hex};
 use unsaid_core::{Index, Manifest, Outcome};
-use unsaid_embed::Embedder;
+use unsaid_embed::{Embedder, is_known_model};
 use unsaid_lwe::{Matrix, Prepared};
 
 use crate::models::cache_dir;
+
+/// Longest manifest a client will read.
+const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+
+/// A process that has just connected sends its first query right after embedding it, and a
+/// longer question takes longer to embed. So that first query leaves on a multiple of this time,
+/// which hides everything up to the length of question this machine embeds within it.
+const EMBED_WINDOW: Duration = Duration::from_millis(500);
 
 /// Something that can answer encrypted queries.
 pub trait Transport: Send + Sync {
@@ -18,39 +27,75 @@ pub trait Transport: Send + Sync {
     fn rank(&self, request: &[u8]) -> Result<Vec<u8>, String>;
     /// Send page queries, get the encrypted pages.
     fn fetch(&self, request: &[u8]) -> Result<Vec<u8>, String>;
+    /// Whether something outside this process can time the requests.
+    fn observable(&self) -> bool;
 }
 
-/// A server reached over HTTP.
+/// A server reached over HTTP. It is treated as hostile: it cannot redirect a request, stall one
+/// forever, or send more than the exact amount the protocol calls for.
 pub struct Http {
     base: String,
+    agent: ureq::Agent,
+    rank: MatrixInfo,
+    payload: MatrixInfo,
 }
 
-fn post(url: &str, body: &[u8]) -> Result<Vec<u8>, String> {
-    let response = ureq::post(url)
-        .set("Content-Type", "application/octet-stream")
-        .send_bytes(body)
-        .map_err(|e| format!("{url}: {e}"))?;
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(120))
+        .timeout_write(Duration::from_secs(120))
+        .build()
+}
+
+/// Read a response of at most `limit` bytes.
+fn read_limited(response: ureq::Response, limit: u64, url: &str) -> Result<Vec<u8>, String> {
+    if response.status() != 200 {
+        return Err(format!("{url} answered {}", response.status()));
+    }
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut response.into_reader(), &mut out)
+    response
+        .into_reader()
+        .take(limit + 1)
+        .read_to_end(&mut out)
         .map_err(|e| format!("{url}: {e}"))?;
+    if out.len() as u64 > limit {
+        return Err(format!("{url} sent more than the {limit} bytes expected"));
+    }
     Ok(out)
 }
 
-fn get(url: &str) -> Result<Vec<u8>, String> {
-    let response = ureq::get(url).call().map_err(|e| format!("{url}: {e}"))?;
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut response.into_reader(), &mut out)
-        .map_err(|e| format!("{url}: {e}"))?;
-    Ok(out)
+fn get(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let response = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
+    read_limited(response, limit, url)
+}
+
+impl Http {
+    fn post(&self, path: &str, matrix: &MatrixInfo, request: &[u8]) -> Result<Vec<u8>, String> {
+        let url = format!("{}{path}", self.base);
+        let queries = (request.len() / (matrix.cols * 4)) as u64;
+        let response = self
+            .agent
+            .post(&url)
+            .set("Content-Type", "application/octet-stream")
+            .send_bytes(request)
+            .map_err(|e| format!("{url}: {e}"))?;
+        read_limited(response, queries * matrix.rows as u64 * 4, &url)
+    }
 }
 
 impl Transport for Http {
     fn rank(&self, request: &[u8]) -> Result<Vec<u8>, String> {
-        post(&format!("{}/v1/rank", self.base), request)
+        self.post("/v1/rank", &self.rank, request)
     }
 
     fn fetch(&self, request: &[u8]) -> Result<Vec<u8>, String> {
-        post(&format!("{}/v1/fetch", self.base), request)
+        self.post("/v1/fetch", &self.payload, request)
+    }
+
+    fn observable(&self) -> bool {
+        true
     }
 }
 
@@ -72,6 +117,10 @@ impl Transport for InProcess {
             .answer(request)
             .ok_or_else(|| "bad request size".to_owned())
     }
+
+    fn observable(&self) -> bool {
+        false
+    }
 }
 
 /// Time and traffic for one search.
@@ -87,6 +136,8 @@ pub struct Trace {
     pub fetch_ms: f64,
     /// Decrypting and assembling results, in milliseconds.
     pub decrypt_ms: f64,
+    /// Waiting on purpose so that timing reveals nothing, in milliseconds.
+    pub held_ms: f64,
     /// Bytes sent to the server.
     pub uploaded: u64,
     /// Bytes received from the server.
@@ -96,7 +147,12 @@ pub struct Trace {
 impl Trace {
     /// The whole search, in milliseconds.
     pub fn total_ms(&self) -> f64 {
-        self.embed_ms + self.encrypt_ms + self.rank_ms + self.fetch_ms + self.decrypt_ms
+        self.embed_ms
+            + self.encrypt_ms
+            + self.rank_ms
+            + self.fetch_ms
+            + self.decrypt_ms
+            + self.held_ms
     }
 }
 
@@ -116,25 +172,24 @@ pub struct Engine {
     taken: Condvar,
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// Fetch a public file, using a local copy when one with the right hash exists.
-fn cached_blob(base: &str, sha256: &str) -> Result<Vec<u8>, String> {
-    let path = cache_dir().join("blobs").join(sha256);
-    if let Ok(data) = std::fs::read(&path) {
-        if sha256_hex(&data) == sha256 {
-            return Ok(data);
+fn cached_blob(agent: &ureq::Agent, base: &str, info: &BlobInfo) -> Result<Vec<u8>, String> {
+    // The manifest has already been checked, so this hash really is a hash and not a path.
+    let path = cache_dir().join("blobs").join(&info.sha256);
+    let right_size = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == info.bytes);
+    if right_size {
+        if let Ok(data) = std::fs::read(&path) {
+            if sha256_hex(&data) == info.sha256 {
+                return Ok(data);
+            }
         }
     }
-    let data = get(&format!("{base}/v1/blob/{sha256}"))?;
-    if sha256_hex(&data) != sha256 {
+    let url = format!("{base}/v1/blob/{}", info.sha256);
+    let data = get(agent, &url, info.bytes)?;
+    if sha256_hex(&data) != info.sha256 {
         return Err(format!(
-            "the server sent a file that does not match hash {sha256}"
+            "the server sent a file that does not match hash {}",
+            info.sha256
         ));
     }
     if let Some(parent) = path.parent() {
@@ -147,24 +202,32 @@ fn cached_blob(base: &str, sha256: &str) -> Result<Vec<u8>, String> {
 
 impl Engine {
     /// Connect to a server, downloading and verifying whatever is not cached yet. If `pin` is
-    /// given, the connection is refused unless the index has that identifier.
-    pub fn connect(base: &str, pin: Option<&str>) -> Result<Self, String> {
+    /// given, the connection is refused unless the index has that identifier. The index's model
+    /// must be on the trusted list or named in `allowed_models`.
+    pub fn connect(
+        base: &str,
+        pin: Option<&str>,
+        allowed_models: &[String],
+    ) -> Result<Self, String> {
         let base = base.trim_end_matches('/').to_owned();
-        let manifest_json = get(&format!("{base}/v1/manifest"))?;
+        let agent = agent();
+        let manifest_json = get(&agent, &format!("{base}/v1/manifest"), MAX_MANIFEST_BYTES)?;
         let manifest = Manifest::parse(&manifest_json).map_err(|e| e.to_string())?;
-        let id = manifest.index_id();
+        let id = index_id(&manifest_json);
         if let Some(pin) = pin {
             if pin != id {
                 return Err(format!("this server has index {id}, not the pinned {pin}"));
             }
         }
-        let blob = |name: &str| -> Result<Vec<u8>, String> {
-            let info = manifest
-                .blobs
-                .get(name)
-                .ok_or_else(|| format!("no blob {name}"))?;
-            cached_blob(&base, &info.sha256)
-        };
+        let model_hash = &manifest.blobs["model"].sha256;
+        if !is_known_model(model_hash) && !allowed_models.contains(model_hash) {
+            return Err(format!(
+                "this index uses a model this client does not know, with hash {model_hash}. A \
+                 model shapes how your query is handled on this machine, so a hostile one could \
+                 reveal words in it. To use it anyway, pass --allow-model {model_hash}"
+            ));
+        }
+        let blob = |name: &str| cached_blob(&agent, &base, &manifest.blobs[name]);
         let (routing, layout, digests, rank_hint, payload_hint, model) = (
             blob("routing")?,
             blob("layout")?,
@@ -185,10 +248,19 @@ impl Engine {
         )
         .map_err(|e| e.to_string())?;
         let embedder = Embedder::load(&model).map_err(|e| e.to_string())?;
+        if embedder.dim() != manifest.model_dim {
+            return Err("the model's vectors do not fit this index".to_owned());
+        }
+        let transport = Http {
+            base,
+            agent,
+            rank: manifest.rank.clone(),
+            payload: manifest.payload.clone(),
+        };
         Ok(Self {
             index,
             embedder,
-            transport: Box::new(Http { base }),
+            transport: Box::new(transport),
             pool: Mutex::default(),
             taken: Condvar::new(),
         })
@@ -214,6 +286,9 @@ impl Engine {
         .map_err(|e| e.to_string())?;
         let embedder = Embedder::load(&read("model.usm")?).map_err(|e| e.to_string())?;
         let m = index.manifest();
+        if embedder.dim() != m.model_dim {
+            return Err("the model's vectors do not fit this index".to_owned());
+        }
         let transport = InProcess {
             rank: Matrix::from_bytes(m.rank.rows, m.rank.cols, &read("rank.matrix")?),
             payload: Matrix::from_bytes(m.payload.rows, m.payload.cols, &read("payload.matrix")?),
@@ -317,10 +392,21 @@ impl Engine {
         trace.downloaded += answer.len() as u64;
 
         let t = Instant::now();
-        let (stage, request) = stage
-            .receive(&self.index, &answer, fetch_tokens, limit)
+        let scored = stage
+            .decrypt(&self.index, &answer)
+            .map_err(|e| e.to_string())?;
+        let decrypting = t.elapsed();
+        let (stage, request) = scored
+            .choose(&self.index, fetch_tokens, limit)
             .map_err(|e| e.to_string())?;
         trace.decrypt_ms = t.elapsed().as_secs_f64() * 1e3;
+        // Ranking the results takes a time that depends on them. It is tiny next to the decryption
+        // before it, which takes a fixed time, so leaving at twice that hides it completely.
+        if self.transport.observable() {
+            let wait = (decrypting * 2).saturating_sub(t.elapsed());
+            std::thread::sleep(wait);
+            trace.held_ms = wait.as_secs_f64() * 1e3;
+        }
         trace.uploaded += request.len() as u64;
 
         let t = Instant::now();
@@ -336,18 +422,83 @@ impl Engine {
         Ok((outcome, trace))
     }
 
-    /// Search for a query.
+    /// Search for a query. Set `just_connected` when this is the first thing a process does after
+    /// connecting, because the server can then time how long the query took to embed.
     pub fn search(
         &self,
         query: &str,
         limit: usize,
         plan: SearchPlan,
+        just_connected: bool,
     ) -> Result<(Outcome, Trace), String> {
         let t = Instant::now();
         let embedding = self.embed(query);
-        let embed_ms = t.elapsed().as_secs_f64() * 1e3;
+        let spent = t.elapsed();
+        let mut held = Duration::ZERO;
+        if just_connected && self.transport.observable() {
+            let windows = spent.as_nanos().div_ceil(EMBED_WINDOW.as_nanos()).max(1) as u32;
+            held = (EMBED_WINDOW * windows).saturating_sub(spent);
+            std::thread::sleep(held);
+        }
         let (outcome, mut trace) = self.search_embedding(&embedding, limit, plan)?;
-        trace.embed_ms = embed_ms;
+        trace.embed_ms = spent.as_secs_f64() * 1e3;
+        trace.held_ms += held.as_secs_f64() * 1e3;
         Ok((outcome, trace))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// Answer one request with these exact bytes, and return the address to ask.
+    fn serve_once(response: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(&response);
+        });
+        format!("http://{address}/")
+    }
+
+    fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{headers}\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn a_response_of_the_right_size_is_read() {
+        let url = serve_once(http_response("200 OK", "", b"12345678"));
+        assert_eq!(get(&agent(), &url, 8).unwrap(), b"12345678");
+    }
+
+    #[test]
+    fn more_data_than_expected_is_refused() {
+        let url = serve_once(http_response("200 OK", "", &[7u8; 1000]));
+        let error = get(&agent(), &url, 16).unwrap_err();
+        assert!(error.contains("more than"), "{error}");
+    }
+
+    /// A redirect could send a query anywhere, and turn a POST into a GET.
+    #[test]
+    fn a_redirect_is_not_followed() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let location = format!("Location: http://{}/\r\n", target.local_addr().unwrap());
+        let url = serve_once(http_response("302 Found", &location, b""));
+        let error = get(&agent(), &url, 16).unwrap_err();
+        assert!(error.contains("302"), "{error}");
+        assert!(target.accept().is_err(), "the client followed the redirect");
     }
 }

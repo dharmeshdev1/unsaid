@@ -15,11 +15,28 @@ use unsaid_lwe::{LOG_Q, LWE_DIM, PublicMatrix, SIGMA};
 /// Format identifier written to and required from every manifest.
 pub const FORMAT: &str = "unsaid-index-1";
 
-/// Longest ciphertext a client will agree to create, in entries. This bounds how much work
-/// and memory a server can make a client spend.
-pub const MAX_COLS: usize = 1 << 26;
+/// Bytes kept from the SHA-256 of a page. Adding to an answer needs no key, so a server could
+/// swap a page for any other with the same digest, which makes this a second preimage problem.
+pub const PAGE_DIGEST_BYTES: usize = 16;
+
+/// Longest ciphertext a client will agree to create, in entries.
+pub const MAX_COLS: usize = 1 << 24;
 /// Largest answer a client will agree to process, in entries.
-pub const MAX_ROWS: usize = 1 << 22;
+pub const MAX_ROWS: usize = 1 << 16;
+/// Most ciphertext entries in one search, which bounds the work a server can make a client do.
+pub const MAX_QUERY_WORDS: u64 = 1 << 26;
+/// Longest model vector a client will accept.
+pub const MAX_MODEL_DIM: usize = 1 << 13;
+/// Most routing prototypes a client will accept.
+pub const MAX_PROTOTYPES: usize = 1 << 24;
+/// Largest model file a client will accept.
+pub const MAX_MODEL_BYTES: u64 = 1 << 31;
+/// Most a client will download, once, for one index.
+pub const MAX_PUBLIC_BYTES: u64 = 1 << 33;
+/// Longest name a client will accept.
+const MAX_NAME_BYTES: usize = 1 << 10;
+/// Quantisation scales outside this range have no use and only make results meaningless.
+const SCALE_RANGE: std::ops::RangeInclusive<f32> = 1e-3..=1e6;
 
 /// Lattice parameters as recorded in a manifest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,6 +140,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The identifier of an index, covering everything in its manifest and so, through the hashes in
+/// there, every public file. Publish it out of band and clients can detect a swapped index.
+pub fn index_id(manifest_json: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"unsaid/v1/index\0");
+    h.update(manifest_json);
+    hex(&h.finalize())
+}
+
+fn is_hash(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Names of the public files that define an index, as opposed to files derived from it.
 const CONTENT_BLOBS: [&str; 4] = ["model", "page_digests", "layout", "routing"];
 const HINT_BLOBS: [&str; 2] = ["payload_hint", "rank_hint"];
@@ -148,14 +178,28 @@ impl Manifest {
                 self.lwe
             ));
         }
-        if self.dim == 0 || self.model_dim == 0 || self.dim > self.model_dim {
+        if self.name.len() > MAX_NAME_BYTES || self.model.len() > MAX_NAME_BYTES {
+            return fail("a name is too long".into());
+        }
+        if self.dim == 0
+            || self.model_dim == 0
+            || self.dim > self.model_dim
+            || self.model_dim > MAX_MODEL_DIM
+        {
             return fail(format!(
                 "bad dimensions {} and {}",
                 self.dim, self.model_dim
             ));
         }
-        if self.clusters == 0 || self.prototypes == 0 {
-            return fail("an index needs clusters and prototypes".into());
+        if self.documents == 0 || self.documents >= u64::from(u32::MAX) {
+            return fail(format!("bad document count {}", self.documents));
+        }
+        if self.clusters == 0
+            || self.clusters > MAX_COLS
+            || self.prototypes == 0
+            || self.prototypes > MAX_PROTOTYPES
+        {
+            return fail("an index needs clusters and a sane number of prototypes".into());
         }
         if self.probes == 0 || self.probes > self.clusters.min(64) {
             return fail(format!("bad probe count {}", self.probes));
@@ -163,14 +207,8 @@ impl Manifest {
         if self.pages == 0 || self.pages > 64 {
             return fail(format!("bad page count {}", self.pages));
         }
-        if !(self.doc_scale > 0.0 && self.query_scale > 0.0) {
-            return fail("quantisation scales must be positive".into());
-        }
-        if self.rank.cols != self.clusters.saturating_mul(self.dim) {
-            return fail("ranking matrix does not have clusters * dim columns".into());
-        }
-        if self.payload.log_p != 8 {
-            return fail("the document matrix must hold bytes".into());
+        if !SCALE_RANGE.contains(&self.doc_scale) || !SCALE_RANGE.contains(&self.query_scale) {
+            return fail("quantisation scales are out of range".into());
         }
         for (label, m) in [("ranking", &self.rank), ("document", &self.payload)] {
             if m.rows == 0 || m.rows > MAX_ROWS || m.cols == 0 || m.cols > MAX_COLS {
@@ -182,12 +220,58 @@ impl Manifest {
                 ));
             }
         }
+        // All of this uses 64 bits, because a browser client has a 32-bit usize.
+        if self.rank.cols as u64 != self.clusters as u64 * self.dim as u64 {
+            return fail("ranking matrix does not have clusters * dim columns".into());
+        }
+        if self.payload.log_p != 8 {
+            return fail("the document matrix must hold bytes".into());
+        }
+        if self.payload.cols as u64 > self.documents {
+            return fail("there are more pages than documents".into());
+        }
+        let words = self.probes as u64 * self.rank.cols as u64
+            + self.pages as u64 * self.payload.cols as u64;
+        if words > MAX_QUERY_WORDS {
+            return fail("one search would need too much ciphertext".into());
+        }
+        let mut total = 0u64;
         for name in CONTENT_BLOBS.iter().chain(&HINT_BLOBS) {
-            if !self.blobs.contains_key(*name) {
+            let Some(blob) = self.blobs.get(*name) else {
                 return fail(format!("the blob {name} is missing"));
+            };
+            if !is_hash(&blob.sha256) {
+                return fail(format!("the blob {name} does not have a valid hash"));
             }
+            let expected = self.expected_bytes(name);
+            if expected.is_some_and(|bytes| bytes != blob.bytes) {
+                return fail(format!("the blob {name} has the wrong size"));
+            }
+            total = total.saturating_add(blob.bytes);
+        }
+        if self.blobs["model"].bytes > MAX_MODEL_BYTES || total > MAX_PUBLIC_BYTES {
+            return fail("the public files are too large".into());
         }
         Ok(())
+    }
+
+    /// The size a public file must have, given the rest of the manifest. The model's size is
+    /// not implied by anything else, so that one has no answer.
+    fn expected_bytes(&self, name: &str) -> Option<u64> {
+        let (md, d, t) = (
+            self.model_dim as u64,
+            self.dim as u64,
+            self.prototypes as u64,
+        );
+        let hint = |rows: usize| rows as u64 * LWE_DIM as u64 * 4;
+        match name {
+            "routing" => Some((md + d * md + t * d) * 4 + t * 4),
+            "layout" => Some((self.clusters as u64 + self.payload.cols as u64) * 4),
+            "page_digests" => Some(self.payload.cols as u64 * PAGE_DIGEST_BYTES as u64),
+            "rank_hint" => Some(hint(self.rank.rows)),
+            "payload_hint" => Some(hint(self.payload.rows)),
+            _ => None,
+        }
     }
 
     /// A hash of everything that defines this index except the hints, which are computed
@@ -225,21 +309,6 @@ impl Manifest {
         h.finalize().into()
     }
 
-    /// A short identifier covering the whole index, hints included. Publish this out of band
-    /// and clients can detect a server that swaps the index for another one.
-    pub fn index_id(&self) -> String {
-        let mut h = Sha256::new();
-        h.update(b"unsaid/v1/index\0");
-        h.update(self.content_id());
-        for name in HINT_BLOBS {
-            h.update(b"\0");
-            if let Some(blob) = self.blobs.get(name) {
-                h.update(blob.sha256.as_bytes());
-            }
-        }
-        hex(&h.finalize()[..16])
-    }
-
     fn seed(&self, label: &str) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(b"unsaid/v1/matrix-a\0");
@@ -273,7 +342,7 @@ pub(crate) mod tests {
         for name in CONTENT_BLOBS.iter().chain(&HINT_BLOBS) {
             blobs.insert((*name).to_owned(), blob(name));
         }
-        Manifest {
+        let mut manifest = Manifest {
             format: FORMAT.into(),
             name: "test".into(),
             documents: 10,
@@ -300,7 +369,13 @@ pub(crate) mod tests {
             },
             lwe: LweParams::current(),
             blobs,
+        };
+        for name in CONTENT_BLOBS.iter().chain(&HINT_BLOBS) {
+            if let Some(bytes) = manifest.expected_bytes(name) {
+                manifest.blobs.get_mut(*name).unwrap().bytes = bytes;
+            }
         }
+        manifest
     }
 
     #[test]
@@ -407,12 +482,103 @@ pub(crate) mod tests {
         assert_eq!(parsed.content_id(), sample().content_id());
     }
 
+    fn id(m: &Manifest) -> String {
+        index_id(&serde_json::to_vec(m).unwrap())
+    }
+
     #[test]
     fn hints_change_the_index_id_but_not_the_matrix() {
         let base = sample();
         let mut other = sample();
         other.blobs.get_mut("rank_hint").unwrap().sha256 = sha256_hex(b"different");
         assert_eq!(base.content_id(), other.content_id());
-        assert_ne!(base.index_id(), other.index_id());
+        assert_ne!(id(&base), id(&other));
+    }
+
+    /// Pinning an index must pin everything a server could otherwise vary per client, such as the
+    /// traffic shape, which could serve as a tag or quietly weaken the results.
+    #[test]
+    fn every_field_is_covered_by_the_index_id() {
+        let base = id(&sample());
+        let changes: [fn(&mut Manifest); 6] = [
+            |m| m.probes = 2,
+            |m| m.pages = 2,
+            |m| m.name = "other".into(),
+            |m| m.rank.failure_log2 = -99.0,
+            |m| m.payload.failure_log2 = -99.0,
+            |m| m.blobs.get_mut("model").unwrap().bytes = 7,
+        ];
+        for change in changes {
+            let mut other = sample();
+            change(&mut other);
+            assert_ne!(id(&other), base);
+        }
+    }
+
+    /// A hash ends up in a cache path, so `/dev/zero` must not pass for one.
+    #[test]
+    fn a_blob_hash_must_be_a_hash() {
+        for bad in ["/dev/zero", "../../etc/passwd", "ABC", "", &"A".repeat(64)] {
+            let mut m = sample();
+            m.blobs.get_mut("routing").unwrap().sha256 = bad.to_owned();
+            assert!(m.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sizes_that_would_overflow_32_bits_are_rejected() {
+        let changes: [fn(&mut Manifest); 7] = [
+            |m| m.rank.rows = 3_355_445,
+            |m| m.payload.rows = 1 << 40,
+            |m| m.model_dim = 1 << 61,
+            |m| {
+                m.model_dim = 1 << 13;
+                m.dim = 1 << 13;
+            },
+            |m| m.prototypes = 1 << 62,
+            |m| m.rank.cols = 1 << 40,
+            |m| m.clusters = 1 << 62,
+        ];
+        for change in changes {
+            let mut m = sample();
+            change(&mut m);
+            assert!(m.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn file_sizes_must_follow_from_the_manifest() {
+        for name in [
+            "routing",
+            "layout",
+            "page_digests",
+            "rank_hint",
+            "payload_hint",
+        ] {
+            let mut m = sample();
+            m.blobs.get_mut(name).unwrap().bytes += 1;
+            assert!(m.validate().is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn unusable_scales_are_rejected() {
+        for scale in [0.0, -1.0, 1e-30, 1e30, f32::INFINITY, f32::NAN] {
+            let mut m = sample();
+            m.doc_scale = scale;
+            assert!(m.validate().is_err(), "{scale}");
+        }
+    }
+
+    #[test]
+    fn work_per_search_is_bounded() {
+        let mut m = sample();
+        m.payload.cols = MAX_COLS;
+        m.documents = MAX_COLS as u64;
+        m.pages = 64;
+        m.blobs.get_mut("layout").unwrap().bytes = m.expected_bytes("layout").unwrap();
+        m.blobs.get_mut("page_digests").unwrap().bytes = m.expected_bytes("page_digests").unwrap();
+        let error = m.validate().unwrap_err();
+        assert!(error.0.contains("too much ciphertext"), "{error}");
     }
 }

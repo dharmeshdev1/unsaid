@@ -340,7 +340,7 @@ async function search(query) {
       "exactly as the server received them. One mark per byte.";
     const decrypt = scored.decryptMs + opened.decryptMs;
     const server = ranked.ms + fetched.ms;
-    const waited = total - begun.embedMs - begun.encryptMs - server - decrypt;
+    const waited = total - begun.embedMs - begun.encryptMs - server - decrypt - scored.heldMs;
     const parts = `understanding the question took ${ms(begun.embedMs)}, ` +
       `encrypting ${ms(begun.encryptMs)}, the server ${ms(server)}, ` +
       `decrypting ${ms(decrypt)}` +
@@ -357,6 +357,7 @@ async function search(query) {
     }
     setPhase("done");
   } catch (error) {
+    state.client.call("abort").catch(() => {});
     setStatus(`The search failed: ${error.message}. Try again.`, "error");
     setPhase("error");
   } finally {
@@ -413,7 +414,12 @@ async function start() {
         bytes: blobs[name].bytes,
       };
     }
-    const loading = [client.call("loadClient", { manifest: source.manifest, files })];
+    // A page from the server that holds the index already has to be trusted as much as the model.
+    const loading = [client.call("loadClient", {
+      manifest: source.manifest,
+      files,
+      allowUnknownModel: source.live,
+    })];
     let server = null;
     if (!source.live) {
       server = new Peer(onProgress);

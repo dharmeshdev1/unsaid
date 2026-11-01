@@ -39,9 +39,11 @@ fn quarter(a: &mut Lane, b: &mut Lane, c: &mut Lane, d: &mut Lane) {
     xor_rot(b, c, 7);
 }
 
-/// Produce `LANES` consecutive ChaCha blocks, in block order, starting at `counter`.
+/// Produce `LANES` consecutive ChaCha blocks, in block order, starting at `counter`. With `WIPE`,
+/// working state that holds the key is cleared afterwards, which is worth its small cost only
+/// when the key is secret.
 #[inline]
-fn group<const ROUNDS: usize>(
+fn group<const ROUNDS: usize, const WIPE: bool>(
     key: &[u32; 8],
     nonce: &[u32; 3],
     counter: u32,
@@ -52,7 +54,7 @@ fn group<const ROUNDS: usize>(
     for (i, c) in ctr.iter_mut().enumerate() {
         *c = counter.wrapping_add(i as u32);
     }
-    let init: [Lane; 16] = [
+    let mut init: [Lane; 16] = [
         splat(SIGMA_WORDS[0]),
         splat(SIGMA_WORDS[1]),
         splat(SIGMA_WORDS[2]),
@@ -98,12 +100,22 @@ fn group<const ROUNDS: usize>(
         quarter(&mut x2, &mut x7, &mut x8, &mut x13);
         quarter(&mut x3, &mut x4, &mut x9, &mut x14);
     }
-    let finals = [
+    let mut finals = [
         x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15,
     ];
     for lane in 0..LANES {
         for word in 0..16 {
             out[lane * 16 + word] = finals[word][lane].wrapping_add(init[word][lane]);
+        }
+    }
+    if WIPE {
+        init.zeroize();
+        finals.zeroize();
+        for state in [
+            &mut x0, &mut x1, &mut x2, &mut x3, &mut x4, &mut x5, &mut x6, &mut x7, &mut x8,
+            &mut x9, &mut x10, &mut x11, &mut x12, &mut x13, &mut x14, &mut x15,
+        ] {
+            state.zeroize();
         }
     }
 }
@@ -120,7 +132,7 @@ fn fill<const ROUNDS: usize>(key: &[u32; 8], nonce: &[u32; 3], start: u32, out: 
     let mut counter = start;
     let mut buf = [0u32; WORDS_PER_GROUP];
     for chunk in out.chunks_mut(WORDS_PER_GROUP) {
-        group::<ROUNDS>(key, nonce, counter, &mut buf);
+        group::<ROUNDS, false>(key, nonce, counter, &mut buf);
         chunk.copy_from_slice(&buf[..chunk.len()]);
         counter = counter.wrapping_add(LANES as u32);
     }
@@ -170,7 +182,7 @@ impl Drbg {
     #[inline]
     pub fn next_u32(&mut self) -> u32 {
         if self.pos == WORDS_PER_GROUP {
-            group::<20>(&self.key, &[0, 0, 0], self.counter, &mut self.buf);
+            group::<20, true>(&self.key, &[0, 0, 0], self.counter, &mut self.buf);
             self.counter = self
                 .counter
                 .checked_add(LANES as u32)
@@ -217,7 +229,7 @@ mod tests {
         let key = key_words(&seed);
         let nonce = [0x0900_0000, 0x4a00_0000, 0];
         let mut out = [0u32; WORDS_PER_GROUP];
-        group::<20>(&key, &nonce, 1, &mut out);
+        group::<20, false>(&key, &nonce, 1, &mut out);
         let want: [u32; 16] = [
             0xe4e7f110, 0x15593bd1, 0x1fdd0f50, 0xc47120a3, 0xc7f4d1c7, 0x0368c033, 0x9aaa2204,
             0x4e6cd4c3, 0x466482d2, 0x09aa9f07, 0x05d7c214, 0xa2028bd9, 0xd19c12b5, 0xb94e16de,
@@ -233,10 +245,10 @@ mod tests {
         let key = key_words(&seed);
         let nonce = [1, 2, 3];
         let mut wide = [0u32; WORDS_PER_GROUP];
-        group::<12>(&key, &nonce, 40, &mut wide);
+        group::<12, false>(&key, &nonce, 40, &mut wide);
         for lane in 0..LANES {
             let mut single = [0u32; WORDS_PER_GROUP];
-            group::<12>(&key, &nonce, 40 + lane as u32, &mut single);
+            group::<12, false>(&key, &nonce, 40 + lane as u32, &mut single);
             assert_eq!(
                 &wide[lane * 16..lane * 16 + 16],
                 &single[..16],

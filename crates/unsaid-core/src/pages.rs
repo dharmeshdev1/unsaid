@@ -83,8 +83,10 @@ pub fn encode(documents: &[&Document], size: usize) -> Option<Vec<u8>> {
     Some(page)
 }
 
-/// Decode a page. `None` means the page is corrupt, and no input can cause a panic.
-pub fn decode(page: &[u8]) -> Option<Vec<Document>> {
+/// Decode a page that should hold at most `max_documents` documents. `None` means the page is
+/// corrupt, and no input can cause a panic. The limit matters because a small page can expand
+/// to over a million empty documents.
+pub fn decode(page: &[u8], max_documents: usize) -> Option<Vec<Document>> {
     let (len, body) = page.split_at_checked(2)?;
     let len = usize::from(u16::from_le_bytes([len[0], len[1]]));
     let packed = body.get(..len)?;
@@ -92,6 +94,9 @@ pub fn decode(page: &[u8]) -> Option<Vec<Document>> {
     let mut input = raw.as_slice();
     let mut documents = Vec::new();
     while !input.is_empty() {
+        if documents.len() == max_documents {
+            return None;
+        }
         let title = get_str(&mut input)?;
         let text = get_str(&mut input)?;
         let url = get_str(&mut input)?;
@@ -118,7 +123,7 @@ mod tests {
         let refs: Vec<&Document> = docs.iter().collect();
         let page = encode(&refs, 1024).unwrap();
         assert_eq!(page.len(), 1024);
-        assert_eq!(decode(&page).unwrap(), docs);
+        assert_eq!(decode(&page, usize::MAX).unwrap(), docs);
     }
 
     #[test]
@@ -131,7 +136,7 @@ mod tests {
     #[test]
     fn an_empty_page_is_valid() {
         let page = encode(&[], 64).unwrap();
-        assert_eq!(decode(&page).unwrap(), vec![]);
+        assert_eq!(decode(&page, usize::MAX).unwrap(), vec![]);
     }
 
     #[test]
@@ -142,7 +147,7 @@ mod tests {
             url: String::new(),
         };
         let page = encode(&[&d], 64).unwrap();
-        assert_eq!(decode(&page).unwrap(), vec![d]);
+        assert_eq!(decode(&page, usize::MAX).unwrap(), vec![d]);
     }
 
     #[test]
@@ -161,9 +166,9 @@ mod tests {
         let docs: Vec<Document> = (0..3).map(doc).collect();
         let refs: Vec<&Document> = docs.iter().collect();
         let good = encode(&refs, 512).unwrap();
-        assert!(decode(&[]).is_none());
-        assert!(decode(&[1]).is_none());
-        assert!(decode(&[0xff, 0xff, 0, 0]).is_none());
+        assert!(decode(&[], usize::MAX).is_none());
+        assert!(decode(&[1], usize::MAX).is_none());
+        assert!(decode(&[0xff, 0xff, 0, 0], usize::MAX).is_none());
         // Flip bytes throughout: any outcome is acceptable except a panic.
         let mut state = 12345u64;
         for _ in 0..3000 {
@@ -175,7 +180,7 @@ mod tests {
                 let at = (state >> 33) as usize % bad.len();
                 bad[at] ^= (state >> 25) as u8 | 1;
             }
-            let _ = decode(&bad);
+            let _ = decode(&bad, usize::MAX);
         }
     }
 
@@ -186,7 +191,7 @@ mod tests {
         assert!(packed.len() < u16::MAX as usize);
         let mut page = (packed.len() as u16).to_le_bytes().to_vec();
         page.extend_from_slice(&packed);
-        assert!(decode(&page).is_none());
+        assert!(decode(&page, usize::MAX).is_none());
     }
 
     /// A long valid document compresses to almost nothing, so only the limit can stop it.
@@ -201,7 +206,23 @@ mod tests {
         assert!(packed.len() < u16::MAX as usize);
         let mut page = (packed.len() as u16).to_le_bytes().to_vec();
         page.extend_from_slice(&packed);
-        assert!(decode(&page).is_none());
+        assert!(decode(&page, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn more_documents_than_the_page_should_hold_are_refused() {
+        let docs: Vec<Document> = (0..3).map(doc).collect();
+        let refs: Vec<&Document> = docs.iter().collect();
+        let page = encode(&refs, 4096).unwrap();
+        assert!(decode(&page, 3).is_some());
+        assert!(decode(&page, 2).is_none());
+
+        // Three zero bytes make an empty document, and they compress extremely well.
+        let raw = vec![0u8; 3 * 100_000];
+        let packed = compress_to_vec(&raw, 7);
+        let mut page = (packed.len() as u16).to_le_bytes().to_vec();
+        page.extend_from_slice(&packed);
+        assert!(decode(&page, 16).is_none());
     }
 
     #[test]
@@ -211,6 +232,6 @@ mod tests {
         let packed = compress_to_vec(&raw, 7);
         let mut page = (packed.len() as u16).to_le_bytes().to_vec();
         page.extend_from_slice(&packed);
-        assert!(decode(&page).is_none());
+        assert!(decode(&page, usize::MAX).is_none());
     }
 }

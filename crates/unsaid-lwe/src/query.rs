@@ -120,8 +120,8 @@ impl Secret {
     pub fn open(&self, log_p: u32, answer: &[u32], hint: &[u32]) -> Vec<u32> {
         let shift = LOG_Q - check_log_p(log_p);
         assert_eq!(
-            hint.len(),
-            answer.len() * LWE_DIM,
+            Some(hint.len()),
+            answer.len().checked_mul(LWE_DIM),
             "hint does not fit this answer"
         );
         let half = 1u32 << (shift - 1);

@@ -55,7 +55,7 @@ function progress(id) {
 
 const handlers = {
   /** Fetch the public files and verify them. `files` maps each blob to its URL. */
-  async loadClient({ manifest, files }, id) {
+  async loadClient({ manifest, files, allowUnknownModel }, id) {
     await wasm();
     const report = progress(id);
     const names = ["routing", "layout", "page_digests", "rank_hint", "payload_hint", "model"];
@@ -67,7 +67,7 @@ const handlers = {
     );
     const text = new TextEncoder().encode(manifest);
     try {
-      engine = new Engine(text, ...parts);
+      engine = new Engine(text, ...parts, allowUnknownModel);
     } catch (error) {
       await self.caches?.delete(CACHE).catch(() => {});
       throw error;
@@ -110,10 +110,23 @@ const handlers = {
     return { request, embedMs: t1 - t0, encryptMs: t2 - t1 };
   },
 
-  receiveRank({ answer, limit }) {
+  async receiveRank({ answer, limit }) {
     const t0 = performance.now();
-    const request = engine.receive_rank(answer, limit);
-    return { request, decryptMs: performance.now() - t0 };
+    engine.decrypt_rank(answer);
+    const decrypting = performance.now() - t0;
+    const request = engine.choose_pages(limit);
+    const decryptMs = performance.now() - t0;
+    // Ranking takes a time that depends on the results, and the next request is the one thing a
+    // server can time. It is tiny next to the decryption, which never varies, so leaving at twice
+    // that hides it.
+    const held = Math.max(0, 2 * decrypting - decryptMs);
+    if (held > 0) await new Promise((resolve) => setTimeout(resolve, held));
+    return { request, decryptMs, heldMs: performance.now() - t0 - decryptMs };
+  },
+
+  abort() {
+    engine?.abort();
+    return {};
   },
 
   receivePages({ answer }) {

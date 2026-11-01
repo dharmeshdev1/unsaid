@@ -7,6 +7,7 @@ mod mcp;
 mod models;
 mod proxy;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,6 +17,7 @@ use clap::{Args, Parser, Subcommand};
 use rayon::prelude::*;
 use unsaid_build::{BuildOptions, IngestOptions, build, read_documents};
 use unsaid_core::client::SearchPlan;
+use unsaid_core::manifest::{index_id, sha256_hex};
 use unsaid_embed::Embedder;
 use unsaid_server::Loaded;
 
@@ -43,7 +45,7 @@ enum Command {
     Serve(ServeArgs),
     /// Search privately from the terminal.
     Search(SearchArgs),
-    /// Try it right now: index a small sample and open a private search page.
+    /// Try it right now: index a small sample and serve a private search page.
     Demo(DemoArgs),
     /// Run a local HTTP gateway so any program can search privately.
     Proxy(ProxyArgs),
@@ -135,6 +137,9 @@ struct ServeArgs {
     /// Port to listen on.
     #[arg(short, long, default_value_t = 8377)]
     port: u16,
+    /// Print every query as it arrives, which shows all that the server can see of it.
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Args, Clone)]
@@ -151,6 +156,10 @@ struct ConnectArgs {
     /// Pages retrieved per search.
     #[arg(long)]
     pages: Option<usize>,
+    /// Accept an embedding model with this SHA-256, beyond the ones this client knows. A model
+    /// shapes how your query is handled here, so only use one you have checked.
+    #[arg(long = "allow-model", value_name = "SHA256")]
+    allowed_models: Vec<String>,
 }
 
 impl ConnectArgs {
@@ -191,6 +200,9 @@ struct DemoArgs {
     /// Embedding model.
     #[arg(long, default_value = "minilm")]
     model: String,
+    /// Print every query as it arrives, which shows all that the server can see of it.
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Args)]
@@ -379,6 +391,11 @@ fn run_build(args: &BuildArgs) -> Result<(), String> {
     );
     println!("  server memory     {}", megabytes(report.private_bytes));
     println!("\nStart it with: unsaid serve {}", args.out.display());
+    let model_hash = sha256_hex(&model);
+    if !unsaid_embed::is_known_model(&model_hash) {
+        println!("This model is not on the trusted list, so clients must opt in to it with:");
+        println!("  --allow-model {model_hash}");
+    }
     Ok(())
 }
 
@@ -386,14 +403,14 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-fn serve(index: &Path, host: &str, port: u16) -> Result<(), String> {
+fn serve(index: &Path, host: &str, port: u16, watch: bool) -> Result<(), String> {
     let loaded = Arc::new(Loaded::open(index)?);
     let manifest = loaded.manifest();
     println!(
         "{}: {} documents, index {}",
         manifest.name,
         manifest.documents,
-        manifest.index_id()
+        loaded.index_id()
     );
     let address = format!("{host}:{port}");
     let shown = if host == "0.0.0.0" {
@@ -403,21 +420,28 @@ fn serve(index: &Path, host: &str, port: u16) -> Result<(), String> {
     };
     println!("Private search at http://{shown}");
     println!("This server never sees what is searched for. Ctrl-C to stop.");
+    if watch {
+        println!("Printing every query exactly as it arrives:\n");
+    }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&address)
             .await
             .map_err(|e| format!("{address}: {e}"))?;
-        axum::serve(listener, unsaid_server::router(loaded, assets::ASSETS))
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .map_err(|e| e.to_string())
+        let app = unsaid_server::router(loaded, assets::ASSETS, watch);
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|e| e.to_string())
     })
 }
 
 fn print_trace(trace: &Trace) {
     eprintln!(
-        "\nsent {} and received {}. embed {:.0} ms, encrypt {:.0} ms, ranking {:.0} ms, pages {:.0} ms, decrypt {:.1} ms, total {:.0} ms",
+        "\nsent {} and received {}. embed {:.0} ms, encrypt {:.0} ms, ranking {:.0} ms, pages {:.0} ms, decrypt {:.1} ms, held for timing {:.0} ms, total {:.0} ms",
         megabytes(trace.uploaded),
         megabytes(trace.downloaded),
         trace.embed_ms,
@@ -425,6 +449,7 @@ fn print_trace(trace: &Trace) {
         trace.rank_ms,
         trace.fetch_ms,
         trace.decrypt_ms,
+        trace.held_ms,
         trace.total_ms(),
     );
 }
@@ -432,8 +457,20 @@ fn print_trace(trace: &Trace) {
 fn connect(index: Option<&Path>, args: &ConnectArgs) -> Result<Engine, String> {
     match index {
         Some(dir) => Engine::local(dir),
-        None => Engine::connect(&args.server, args.pin.as_deref()),
+        None => Engine::connect(&args.server, args.pin.as_deref(), &args.allowed_models),
     }
+}
+
+/// Text from a server is going to a terminal, where escape sequences can rewrite the screen, hide
+/// a warning, or set the clipboard. Text direction overrides can disguise what is shown.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect()
 }
 
 fn run_search(args: &SearchArgs) -> Result<(), String> {
@@ -445,7 +482,12 @@ fn run_search(args: &SearchArgs) -> Result<(), String> {
     }
     let engine = connect(args.index.as_deref(), &args.connect)?;
     let plan = args.connect.plan(&engine);
-    let (outcome, trace) = engine.search(&query, args.limit, plan)?;
+    let (mut outcome, trace) = engine.search(&query, args.limit, plan, args.index.is_none())?;
+    for hit in &mut outcome.hits {
+        hit.document.title = printable(&hit.document.title);
+        hit.document.text = printable(&hit.document.text);
+        hit.document.url = printable(&hit.document.url);
+    }
     if args.json {
         let value = serde_json::json!({"outcome": outcome, "trace": trace});
         println!("{value}");
@@ -503,7 +545,7 @@ fn run_demo(args: &DemoArgs) -> Result<(), String> {
             tuning,
         })?;
     }
-    serve(&dir, "127.0.0.1", args.port)
+    serve(&dir, "127.0.0.1", args.port, args.watch)
 }
 
 fn run_info(args: &InfoArgs) -> Result<(), String> {
@@ -511,7 +553,7 @@ fn run_info(args: &InfoArgs) -> Result<(), String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let m = unsaid_core::Manifest::parse(&bytes).map_err(|e| e.to_string())?;
     println!("{}", m.name);
-    println!("  index id          {}", m.index_id());
+    println!("  index id          {}", index_id(&bytes));
     println!("  documents         {}", m.documents);
     println!(
         "  model             {} ({} dimensions, projected to {})",
@@ -573,7 +615,7 @@ fn run_bench(args: &BenchArgs) -> Result<(), String> {
     }
     let mut traces = Vec::with_capacity(args.n);
     for i in 0..args.n {
-        let (outcome, trace) = engine.search(&owned[i % owned.len()], 10, plan)?;
+        let (outcome, trace) = engine.search(&owned[i % owned.len()], 10, plan, false)?;
         if outcome.corrupted_pages > 0 {
             return Err(format!("{} pages were corrupted", outcome.corrupted_pages));
         }
@@ -585,12 +627,13 @@ fn run_bench(args: &BenchArgs) -> Result<(), String> {
         let at = |q: f64| values[((q * values.len() as f64) as usize).min(values.len() - 1)];
         (at(0.5), at(0.95))
     };
-    let rows: [(&str, (f64, f64)); 6] = [
+    let rows: [(&str, (f64, f64)); 7] = [
         ("embed query", stat(&|t| t.embed_ms)),
         ("encrypt", stat(&|t| t.encrypt_ms)),
         ("server: ranking", stat(&|t| t.rank_ms)),
         ("server: pages", stat(&|t| t.fetch_ms)),
         ("decrypt", stat(&|t| t.decrypt_ms)),
+        ("held for timing", stat(&|t| t.held_ms)),
         ("total", stat(&|t| t.total_ms())),
     ];
     let m = engine.index().manifest();
@@ -633,7 +676,7 @@ fn run_bench(args: &BenchArgs) -> Result<(), String> {
 fn run() -> Result<(), String> {
     match Cli::parse().command {
         Command::Build(args) => run_build(&args),
-        Command::Serve(args) => serve(&args.index, &args.host, args.port),
+        Command::Serve(args) => serve(&args.index, &args.host, args.port, args.watch),
         Command::Search(args) => run_search(&args),
         Command::Demo(args) => run_demo(&args),
         Command::Proxy(args) => {

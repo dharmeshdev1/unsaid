@@ -14,6 +14,8 @@ pub mod client;
 pub mod manifest;
 pub mod pages;
 
-pub use client::{FetchStage, Hit, Index, IndexFiles, Outcome, RankStage, SearchError, SearchPlan};
+pub use client::{
+    FetchStage, Hit, Index, IndexFiles, Outcome, RankStage, ScoredStage, SearchError, SearchPlan,
+};
 pub use manifest::{BlobInfo, Manifest, ManifestError};
 pub use pages::Document;

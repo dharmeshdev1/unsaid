@@ -1,7 +1,8 @@
 # Running a real server
 
-`unsaid serve` is one process with no dependencies. It holds the index in memory, and it stores nothing
-about requests beyond two counters, which `GET /v1/stats` shows to anyone who asks.
+`unsaid serve` is one process with no dependencies. It holds the index in memory, and it keeps no
+record of requests at all, not even a count. To see what arrives, run it with `--watch`, which prints
+each query's source address, size and first bytes.
 
 ## Sizing
 
@@ -40,17 +41,24 @@ docker run -p 8377:8377 -v "$PWD/my-index:/index:ro" unsaid
 the server, such as a README, and clients can check it:
 
 ```sh
-unsaid search "your question" --server https://search.example.com --pin 474093d2d0d4bcb9024fb3dceb1789d1
+unsaid search "your question" --server https://search.example.com --pin 1296c1366c94...33888c2b2
 ```
 
-That stops a server from quietly giving one person a different index.
+That stops a server from quietly giving one person a different index, or tagging them with a
+different number of probes.
+
+## Custom models
+
+Clients only accept the models built into them, because a hostile model could reveal words in a query.
+If you build with `--model path/to/model.usm`, the build prints a hash, and clients must pass it with
+`--allow-model`. They should only do that if they trust you with what they type.
 
 ## Rate limits
 
 Each search makes the server do real work for anyone who asks, so a public server needs limits. Set
 them in your reverse proxy. Limit by IP address, or issue API keys there, because the server itself
-has no accounts. It caps queries per request and how many requests it works on at once, and nothing
-more than that.
+has no accounts. It caps queries per request, the memory held by uploads in progress, how long an upload
+may take, and how many requests it works on at once. It does not limit connections.
 
 ## Updating the index
 

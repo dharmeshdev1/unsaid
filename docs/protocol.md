@@ -52,13 +52,42 @@ content_id = SHA-256( "unsaid/v1/content\0" || numbers
                       || for name in model, page_digests, layout, routing:
                          "\0" || name || "=" || hex(blobs[name].sha256) )
 
-index_id   = hex of the first 16 bytes of
-             SHA-256( "unsaid/v1/index\0" || content_id
-                      || "\0" || hex(blobs.payload_hint.sha256)
-                      || "\0" || hex(blobs.rank_hint.sha256) )
+index_id   = hex of SHA-256( "unsaid/v1/index\0" || the manifest file, byte for byte )
 ```
 
-`index_id` covers the whole index, so publishing it elsewhere lets clients detect a swapped index.
+`index_id` covers everything in the manifest and, through the hashes in it, every public file.
+Publishing it elsewhere lets clients detect a swapped index. See `--pin` in
+[deploying.md](deploying.md).
+
+### What a client must check
+
+The server supplies the manifest, so it can put anything in there. A client must refuse a manifest
+unless all of these hold, doing the arithmetic in at least 64 bits:
+
+| Check | Limit |
+| --- | --- |
+| Lattice parameters | Exactly as in section 1 |
+| `rank.rows`, `payload.rows` | 1 to 65,536 |
+| `rank.cols`, `payload.cols` | 1 to 16,777,216 |
+| `rank.cols` | Equal to `clusters * dim` |
+| `rank.log_p` | 2 to 24 |
+| `payload.log_p` | 8 |
+| `probes` | 1 to the smaller of `clusters` and 64 |
+| `pages` | 1 to 64 |
+| `probes * rank.cols + pages * payload.cols` | At most 67,108,864 |
+| `dim` and `model_dim` | `dim` at least 1, at most `model_dim`, at most 8,192 |
+| `prototypes` | 1 to 16,777,216 |
+| `documents` | At least `payload.cols`, below 2^32 - 1 |
+| `doc_scale`, `query_scale` | 0.001 to 1,000,000 |
+| Each `blobs[name].sha256` | Exactly 64 lowercase hexadecimal characters |
+| Each `blobs[name].bytes` | The size in section 3 |
+| The model file | At most 2 GiB |
+| All public files together | At most 8 GiB |
+
+**A client must also not use a model it does not already trust.** A model shapes how a query is
+processed on the client, so one built to crash or slow down on certain words could reveal them, with
+no attack on the encryption at all. The reference client refuses any model whose hash is not compiled
+in, unless the user names that hash.
 
 ### Public matrices
 
@@ -88,7 +117,7 @@ forever.
 - **`layout`** holds `sizes` (`clusters` 32-bit document counts) and `page_first` (`payload.cols`
   32-bit document numbers, strictly increasing and starting at 0). Documents are numbered cluster by
   cluster.
-- **`page_digests`** holds the first 8 bytes of the SHA-256 of each page.
+- **`page_digests`** holds the first 16 bytes of the SHA-256 of each page.
 - **`rank_hint`** and **`payload_hint`** each hold the `rows * 1280` words of `H = M A`, by row.
 
 ## 4. Encryption
@@ -123,16 +152,24 @@ Reusing `s` reveals the difference of two plaintexts, so a secret must only ever
    column `c * dim + i` and zero elsewhere, with `log_p = rank.log_p`. `POST /v1/rank` the
    concatenated ciphertexts.
 5. **Read the scores.** The answer holds `probes * rank.rows` words. In each block, row `r` is the
-   score of document `start(c) + r`. Rows past the cluster's size are padding, and a client should
-   decrypt them anyway so that its timing does not depend on the cluster. A document's estimated
-   similarity is its value divided by `doc_scale * query_scale`.
+   score of document `start(c) + r`. Rows past the cluster's size are padding, and a client must
+   decrypt them anyway, because the server chooses cluster sizes and can time what comes next. A
+   document's estimated similarity is its value divided by `doc_scale * query_scale`.
 6. **Choose pages.** Walk the documents from best to worst and collect each one's page, until there
    are `pages` distinct pages. If there are too few, add others so there is always the same number.
+   **Hold the next request** until twice the time step 5 took, because the time this step takes
+   depends on the results and the server can measure the gap.
 7. **Fetch.** For each page `p`, encrypt the unit vector with 1 at column `p` and `log_p = 8`.
    `POST /v1/fetch` the concatenated ciphertexts.
 8. **Open.** The answer holds `pages * payload.rows` words. Decrypt each block to `payload.rows` bytes,
-   compare its truncated SHA-256 with `page_digests`, and decode it. If a check fails, drop that page,
-   but do not change anything a server could observe.
+   compare its truncated SHA-256 with `page_digests`, and decode it, refusing any page that holds more
+   documents than the layout says. If a check fails, drop that page, but do not change anything a
+   server could observe.
+
+A process that has just connected should also hide how long step 1 took, since the server can time
+the gap between its last download and the first query. The reference client sends that first query
+on a multiple of 500 ms. A long-running client does not need this, because the server cannot tell
+when the question was asked.
 
 ## 6. Pages
 
@@ -154,7 +191,10 @@ documents `page_first[p]`, `page_first[p] + 1`, and so on.
 | `GET /v1/blob/{sha256}` | A public file, or 404 |
 | `POST /v1/rank` | `application/octet-stream`: whole ciphertexts of `rank.cols` words, at most 64 |
 | `POST /v1/fetch` | `application/octet-stream`: whole ciphertexts of `payload.cols` words, at most 64 |
-| `GET /v1/stats` | Document count and the number of requests served |
 | `GET /v1/health` | `ok` |
 
-A body that is empty or not a whole number of ciphertexts gets a 400, and one with too many gets a 413.
+Queries must state a `Content-Length`, or they get a 411. A body that is empty, not a whole number of
+ciphertexts or not the stated length gets a 400, and one with too many ciphertexts gets a 413.
+
+A client must not follow redirects, because one could send a query anywhere, and should not read more
+than the exact size of the response it expects.

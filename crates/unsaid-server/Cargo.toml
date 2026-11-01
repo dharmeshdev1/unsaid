@@ -12,10 +12,14 @@ repository.workspace = true
 unsaid-core.workspace = true
 unsaid-lwe.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "macros", "time"] }
 tower-http = { version = "0.6", features = ["cors"] }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+unsaid-build.workspace = true
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

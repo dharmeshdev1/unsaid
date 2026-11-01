@@ -4,27 +4,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-
-struct KnownModel {
-    key: &'static str,
-    file: &'static str,
-    sha256: &'static str,
-}
+use unsaid_embed::KNOWN_MODELS;
 
 const BASE_URL: &str = "https://github.com/dharmeshdev1/unsaid/releases/download/models-v1";
 
-const MODELS: [KnownModel; 2] = [
-    KnownModel {
-        key: "minilm",
-        file: "all-MiniLM-L6-v2.usm",
-        sha256: "b3fd40c159f2dca22fdeba20ed584e64ed980208be96486068f3789d8c32b51f",
-    },
-    KnownModel {
-        key: "bge",
-        file: "bge-small-en-v1.5.usm",
-        sha256: "eefe4ec54fc8f2d16dff877213276a081f64de9b44c3931bf4b1139894d0395d",
-    },
-];
+/// Larger than any model on the trusted list. The hash decides what is kept, and this decides how
+/// much is read to find out.
+const MAX_MODEL_DOWNLOAD: u64 = 1 << 30;
 
 /// Where downloaded files are kept.
 pub fn cache_dir() -> PathBuf {
@@ -50,7 +36,7 @@ fn download(url: &str, path: &Path, sha256: &str) -> Result<(), String> {
         .header("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let mut reader = response.into_reader();
+    let mut reader = response.into_reader().take(MAX_MODEL_DOWNLOAD);
     let mut data = Vec::with_capacity(total as usize);
     let mut buffer = vec![0u8; 1 << 20];
     let mut last_report = 0u64;
@@ -86,7 +72,7 @@ pub fn resolve(model: &str) -> Result<Vec<u8>, String> {
     if as_path.is_file() {
         return std::fs::read(as_path).map_err(|e| format!("{model}: {e}"));
     }
-    let known = MODELS
+    let known = KNOWN_MODELS
         .iter()
         .find(|m| m.key == model || m.file.starts_with(model))
         .ok_or_else(|| {

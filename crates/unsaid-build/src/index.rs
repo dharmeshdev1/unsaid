@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use unsaid_core::Document;
 use unsaid_core::client::PAGE_DIGEST_BYTES;
-use unsaid_core::manifest::{BlobInfo, FORMAT, LweParams, MatrixInfo, sha256_hex};
+use unsaid_core::manifest::{BlobInfo, FORMAT, LweParams, MatrixInfo, index_id, sha256_hex};
 use unsaid_core::{Manifest, pages};
 use unsaid_lwe::noise::failure_log2;
 use unsaid_lwe::params::MAX_FAILURE_LOG2;
@@ -93,6 +93,9 @@ pub struct BuildReport {
     /// Identifier of the whole index.
     pub index_id: String,
 }
+
+/// Smallest page allowed. Below a few bytes not even an empty document fits.
+const MIN_PAGE_BYTES: usize = 64;
 
 /// Nearest power of two, within limits.
 fn nearest_power_of_two(value: f64, low: usize, high: usize) -> usize {
@@ -377,6 +380,9 @@ pub fn build(
     let page_bytes = options
         .page_bytes
         .unwrap_or_else(|| automatic_page_bytes(sample_compressed, options.pages));
+    if page_bytes < MIN_PAGE_BYTES {
+        return Err(format!("a page must hold at least {MIN_PAGE_BYTES} bytes"));
+    }
 
     // Pages never cross a cluster boundary, so a cluster's best documents stay together.
     let by_cluster: Vec<Vec<(Vec<u8>, usize)>> = (0..clusters)
@@ -527,7 +533,7 @@ pub fn build(
         private_bytes: (rank_matrix.data().len() + payload_matrix.data().len()) as u64,
         upload_per_search: (probes * rank_cols as u64 + fetches * page_count as u64) * 4,
         download_per_search: (probes * rank_rows as u64 + fetches * page_bytes as u64) * 4,
-        index_id: manifest.index_id(),
+        index_id: index_id(&json),
     })
 }
 
@@ -564,7 +570,7 @@ mod tests {
         let mut recovered = Vec::new();
         for (page, count) in &pages_out {
             assert_eq!(page.len(), 512);
-            let d = pages::decode(page).unwrap();
+            let d = pages::decode(page, usize::MAX).unwrap();
             assert_eq!(d.len(), *count);
             recovered.extend(d);
         }
@@ -589,7 +595,7 @@ mod tests {
         let pages_out = paginate(&[doc(1, 3), big, doc(2, 3)], 512);
         let all: Vec<Document> = pages_out
             .iter()
-            .flat_map(|(p, _)| pages::decode(p).unwrap())
+            .flat_map(|(p, _)| pages::decode(p, usize::MAX).unwrap())
             .collect();
         assert_eq!(all.len(), 3);
         assert_eq!(all[1].title, "Huge");
@@ -604,7 +610,7 @@ mod tests {
             url: String::new(),
         };
         let pages_out = paginate(&[d], 256);
-        assert!(pages::decode(&pages_out[0].0).is_some());
+        assert!(pages::decode(&pages_out[0].0, usize::MAX).is_some());
     }
 
     #[test]

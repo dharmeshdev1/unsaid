@@ -264,7 +264,7 @@ h1 {
 .steps li { margin-bottom: 0.6rem; padding-left: 0.2rem; }
 .steps li::marker { font-family: var(--display); font-weight: 600; }
 
-.mode-note { color: var(--ink-soft); }
+.mode-note { color: var(--ink-soft); overflow-wrap: anywhere; }
 .colophon { margin-top: 1.6rem; font-size: 0.9375rem; color: var(--ink-soft); }
 
 /* The server */

@@ -492,11 +492,14 @@ fn a_forged_page_that_decodes_cleanly_is_caught_by_its_digest() {
     let real: Vec<u8> = (0..rows)
         .map(|r| stored[r * m.payload.cols + page])
         .collect();
-    let mut documents = pages::decode(&real).unwrap();
+    let mut documents = pages::decode(&real, usize::MAX).unwrap();
     documents[0].title = "Forged".into();
     let refs: Vec<&Document> = documents.iter().collect();
     let forged = pages::encode(&refs, rows).unwrap();
-    assert_eq!(pages::decode(&forged).unwrap()[0].title, "Forged");
+    assert_eq!(
+        pages::decode(&forged, usize::MAX).unwrap()[0].title,
+        "Forged"
+    );
 
     for (r, word) in answer[..rows * 4].chunks_exact_mut(4).enumerate() {
         let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
@@ -524,9 +527,7 @@ fn small_indexes_still_send_every_query_they_promised() {
         let e = &b.embeddings[..MODEL_DIM];
 
         let probes = m.clusters + 3;
-        let tokens = (0..probes)
-            .map(|_| index.prepare_rank().unwrap())
-            .collect();
+        let tokens = (0..probes).map(|_| index.prepare_rank().unwrap()).collect();
         let (stage, request) = index.begin(e, tokens).unwrap();
         assert_eq!(request.len(), probes * m.rank.cols * 4, "n = {n}");
 

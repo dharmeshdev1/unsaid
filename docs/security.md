@@ -6,15 +6,12 @@ hurt someone until experts have reviewed it. If you find a problem, see [SECURIT
 
 ## What is protected
 
-The server, or anyone who takes it over, cannot learn:
+The server cannot read what you searched for, which clusters your device chose, which documents or
+pages you received, or whether two searches were the same. This rests on the learning with errors
+problem being hard, and not on a policy, on deleted logs, or on trusting a third party.
 
-- what you searched for,
-- which clusters your device chose,
-- which documents or pages you received, or
-- whether two searches were the same.
-
-That holds even if the server misbehaves on purpose, assuming that the learning with errors problem
-is hard. It does not rest on a policy, on deleting logs, or on trusting a third party.
+Encryption is only part of it. A dishonest server can also watch what your client does, so the rest of
+this page is about closing those channels, and about the ones that remain open.
 
 ## What is not protected
 
@@ -26,24 +23,25 @@ Read this part carefully. These things stay visible:
 | The time of each search | Nothing here hides this |
 | How many searches you make, and how far apart | Send decoy searches at a steady rate |
 | That you use this index at all | Choose a broad index. Someone using an index only about one illness reveals that topic even though each query is hidden |
-| Which result you open, if you follow its link | The destination site sees your visit. The text in the results is already on your device |
+| Which result you open, if you follow its link | Result links can point anywhere, including back at the server with a tag. Read the text on your device, and check where a link goes |
 
 Unsaid also does not protect:
 
 - **You from a false answer.** The server cannot read your query, but it can return wrong scores or
-  serve a different index. Page hashes catch corruption relative to the published index, and
-  `--pin` catches a swapped index, but nothing proves that the scores were computed honestly.
+  serve a different index. Page hashes catch a page that differs from the published index, and `--pin`
+  catches a swapped index, but nothing proves that the scores were computed honestly.
 - **The server's documents from its users.** A client can eventually read everything by asking for
   each page. The hints also leak linear combinations of the data, and an index with fewer columns than
   the lattice dimension can be recovered from its hint outright. Only build an index from data the
   people searching it are allowed to read.
 - **You from a malicious web page.** If you open the web interface from the server you are hiding from,
-  that server supplies the code that handles your question. A dishonest operator could serve a page
-  that sends it in plain text. Use the command line client, or host a copy of the page separately.
-  The page's content security policy stops other sites receiving data, and result text is never
-  inserted as HTML, but neither helps against the operator of the page.
-- **Your device.** Malware on your own machine can read your query. Queries are held in ordinary
-  memory, and only the lattice secrets are wiped after use.
+  that server supplies the code that handles your question, and it could send that in plain text. If
+  you do not trust the operator, use the command line client or the gateway, which are programs on your
+  own machine. The page's content security policy stops other sites receiving data, and result text is
+  never inserted as HTML, but neither helps against the operator of the page.
+- **You from your own device.** Malware on your machine can read your query. Lattice secrets are wiped
+  from memory after use on a best-effort basis, since Rust can leave copies when values move, and the
+  query itself is kept in ordinary memory.
 
 ## Lattice parameters
 
@@ -66,11 +64,12 @@ of an attack. The script first reproduces the published figures and then applies
 | `n = 1024`, `q = 2^32`, `sigma = 6.4` | 2^95.2 | 2^95.2 | 2^86.4 |
 | **Unsaid: `n = 1280`, `q = 2^32`, `sigma = 6.4`** | **2^128.8** | **2^128.5** | **2^116.9** |
 
-`n = 1024` is common in PIR papers, and is reported at about 128 bits under the more detailed cost
-model of the [lattice estimator](https://github.com/malb/lattice-estimator). Queries may be stored
-for a long time and be sensitive for a long time, so Unsaid uses the same conservative model as
-ML-KEM and clears ML-KEM-512's margin in it. That costs about 25% more in hint size and client work.
-The estimate takes attacks as understood today and is not a proof.
+`n = 1024` with these `q` and `sigma` is common in PIR papers, which estimate it with more detailed cost
+models that count more of an attack's real expense. Queries may be stored for a long time and be
+sensitive for a long time, so Unsaid uses the same conservative model as ML-KEM and clears ML-KEM-512's
+margin in it. That costs about 25% more in hint size and client work. The estimate reflects attacks as
+understood today and is not a proof. To go further, run the parameters through the
+[lattice estimator](https://github.com/malb/lattice-estimator).
 
 The attacker sees one sample per column for each query, far more than the attacks above can use, and
 each query has a fresh secret. All queries against an index share one matrix `A`. An attacker could
@@ -78,29 +77,49 @@ reduce a basis for `A` once and reuse the work, which is why `A` depends on the 
 
 ## Defences against a malicious server
 
-The design assumes that the server is an adversary and controls everything it sends.
+The design assumes that the server is an adversary and controls everything it sends. An independent
+adversarial review of an earlier version found real problems here, and every row marked with a star
+came out of it.
 
 | Attack | Defence |
 | --- | --- |
 | Weaken the encryption with chosen parameters | Parameters are compiled into the client, and a manifest that disagrees is refused |
 | Choose a public matrix with a trapdoor | The client derives `A` by hashing the index contents |
+| ★ Send a model that crashes or stalls on certain words, so that a missing request reveals them | Clients refuse any model not on a compiled-in list unless the user names its hash. The parser uses checked arithmetic and validates every shape, and a test confirms that thousands of randomly damaged files never panic |
+| ★ Choose sizes that overflow in a browser's 32-bit arithmetic, to crash on chosen clusters | Every size is checked in 64 bits against strict limits before anything is allocated |
+| ★ Time the gap before the second request, which depended on the chosen cluster's size | Every row of every answer is decrypted whatever the cluster's size, every entry is visited when choosing pages, and the request leaves at twice the fixed decryption time |
+| ★ Time how long a one-shot client takes to embed, which depends on the question's length | A client that has just connected sends its first query on a multiple of 500 ms. A long-running one sends at a time unrelated to connecting |
 | Learn from how the client reacts to a bad answer | Every search has the same shape, including when pages fail their checks, and each request has a fresh secret, so there is no decryption oracle |
-| Learn from which pages get requested | They are encrypted like everything else |
+| Swap a page by adding to the answer, which needs no key | Pages are checked against a 128-bit digest, and a test performs exactly this attack |
 | Make the client use one secret twice | A secret is consumed by encrypting, so reuse does not compile, and there is a test proving that it does not |
-| Exhaust the client's memory with a huge index or page | Sizes are bounded and checked, and page decompression is capped |
-| Crash the client with malformed files | Parsers return errors and do not panic, including on the model file. `unsafe` is forbidden in every crate except the WebAssembly bindings, where the generated glue needs it |
-| Serve different content to one person | Publish the `index_id` and use `--pin` |
+| ★ Exhaust the client with a huge or endless response, or a page full of empty documents | Responses are cut off at the exact size expected, connections time out, and a page may not hold more documents than the layout says |
+| ★ Redirect a query somewhere else | Redirects are not followed |
+| ★ Use a cache path such as `/dev/zero` as a file's hash | A hash must be 64 hexadecimal characters |
+| ★ Attack the terminal with escape sequences in result text | Control characters and direction overrides are removed before printing |
+| ★ Have a web page use the local gateway | The gateway refuses requests from browsers and unexpected hosts |
+| Serve different content, or a different traffic shape, to one person | Publish the `index_id`, which covers the whole manifest, and use `--pin` |
+
+`unsafe` is forbidden in every crate except the WebAssembly bindings, where the generated glue needs it.
 
 ## Known weaknesses
 
-- **Timing between requests.** The second request leaves right after the first answer is processed.
-  The client decrypts every row so that the work does not depend on the cluster, but sorting and
-  page selection are not constant-time. The effect should be small next to network jitter, and
-  nobody has measured it carefully. That would make a good project.
-- **Local side channels.** The Gaussian sampler and the rest of the client make no attempt to resist
-  an attacker who can measure timing or power on your own device.
-- **Denial of service.** The server does expensive work for anyone who asks. Put rate limits in front
-  of it. The server limits the queries per request and its concurrency, and nothing else.
+- **Recognising a returning client.** A client downloads public files only once. A server could hand
+  each client unique files and see, from what it fails to download later, that it has met this client
+  before, even from a new IP address. If you are separating identities, use `--pin`, or a separate
+  `UNSAID_CACHE` directory for each one.
+- **Timing is reduced, not eliminated.** Ordinary jitter in your machine remains, and a question long
+  enough to take more than 500 ms to embed lands in a later window. Nobody has measured what is left
+  over a real network, and that would make a good project.
+- **Your reactions.** If a page fails its check and you search again, the server sees a second search.
+  It could use that to test a guess about which page you asked for, one guess at a time.
+- **AI agents.** Results are text from the server, and a dishonest one could include instructions aimed
+  at an agent, such as to send the query somewhere else. The tool's description says to treat results
+  as data, but that is not a guarantee. Be careful about what else an agent using this can do.
+- **Local side channels.** The Gaussian sampler reads its whole table for every sample, but the client
+  as a whole makes no attempt to resist someone measuring timing or power on your own device.
+- **Denial of service.** The server does expensive work for anyone who asks. It limits the queries per
+  request, the memory held by uploads and its concurrency, but not connections, so put rate limits in
+  front of it.
 - **Multi-target attacks.** Security estimates are per query. With very many queries against one `A`,
   a lattice attacker could benefit somewhat from precomputation.
 

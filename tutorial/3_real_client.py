@@ -7,12 +7,14 @@
 This shares no code with the Rust client, only docs/protocol.md, and that is the point: if you can
 read this file, you understand everything that goes over the wire. It needs numpy and the `unsaid`
 binary, which it asks for the query's embedding so that this file does not need a neural network.
-It is written to be read, so unlike the Rust client it does not defend against a malicious server,
-wipe its secrets, or keep its traffic to a fixed shape when things go wrong.
+It is written to be read, so unlike the Rust client it trusts the server's manifest more than it
+should, keeps its secrets in ordinary memory, and takes no care over its own timing. Use it to learn
+from, and use the real client to keep something private.
 """
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import urllib.request
 import zlib
@@ -21,7 +23,12 @@ import numpy as np
 
 N = 1280
 SIGMA = 6.4
-DIGEST_BYTES = 8
+DIGEST_BYTES = 16
+
+# The error distribution from the protocol: a discrete Gaussian, cut off at 62.
+TAIL = 62
+_weights = np.exp(-(np.arange(-TAIL, TAIL + 1, dtype=float) ** 2) / (2 * SIGMA**2))
+ERROR_CDF = np.cumsum(_weights / _weights.sum())
 
 
 def get(base, path):
@@ -47,7 +54,7 @@ def content_id(manifest):
     """Protocol section 2. Both public matrices are derived from this hash of the index."""
     m = manifest
     numbers = " ".join(
-        f"{value:g}" if isinstance(value, float) else str(value)
+        repr(value).removesuffix(".0") if isinstance(value, float) else str(value)
         for value in [
             m["format"], m["documents"], m["model"], m["model_dim"], m["dim"], m["clusters"],
             m["prototypes"], m["doc_scale"], m["query_scale"], m["rank"]["rows"], m["rank"]["cols"],
@@ -102,11 +109,22 @@ def times(matrix, vector):
     return (matrix * vector).sum(axis=1, dtype=np.uint32)
 
 
-def encrypt(A, log_p, entries, rng):
+def random_words(count):
+    """Uniform words from the operating system. A secret must not come from a predictable source."""
+    return np.frombuffer(os.urandom(4 * count), dtype="<u4")
+
+
+def error_samples(count):
+    """Samples of the error distribution, chosen by inverting its cumulative distribution."""
+    uniform = np.frombuffer(os.urandom(8 * count), dtype="<u8") / 2.0**64
+    values = np.searchsorted(ERROR_CDF, uniform) - TAIL
+    return values.astype(np.int64).astype(np.uint32)
+
+
+def encrypt(A, log_p, entries):
     """A fresh secret for every query. Reusing one would reveal the difference of two queries."""
-    secret = rng.integers(0, 2**32, size=N, dtype=np.uint32)
-    noise = np.rint(rng.normal(0, SIGMA, size=len(A))).astype(np.int64).astype(np.uint32)
-    ciphertext = times(A, secret) + noise
+    secret = random_words(N)
+    ciphertext = times(A, secret) + error_samples(len(A))
     for index, value in entries:
         ciphertext[index] = (int(ciphertext[index]) + (int(value) << (32 - log_p))) % 2**32
     return secret, ciphertext
@@ -152,7 +170,6 @@ def main():
     args = parser.parse_args()
     query = " ".join(args.query)
     base = args.server.rstrip("/")
-    rng = np.random.default_rng()
 
     # Step 1: the public files. A real client caches these.
     manifest = json.loads(get(base, "/v1/manifest"))
@@ -180,7 +197,8 @@ def main():
     page_A = public_matrix(matrix_seed(manifest, "payload"), page_cols)
 
     # Step 2: turn the question into a vector, on this machine.
-    output = subprocess.run([args.unsaid, "embed", query], capture_output=True, check=True)
+    command = [args.unsaid, "embed", "--model", manifest["model"], "--", query]
+    output = subprocess.run(command, capture_output=True, check=True)
     vector = np.array(json.loads(output.stdout), dtype=np.float32)
     projected = projection @ (vector - mean)
     projected /= np.linalg.norm(projected)
@@ -197,7 +215,7 @@ def main():
     secrets, parts = [], []
     for cluster in clusters:
         entries = [(int(cluster) * dim + i, v) for i, v in enumerate(plain)]
-        secret, ciphertext = encrypt(rank_A, log_p, entries, rng)
+        secret, ciphertext = encrypt(rank_A, log_p, entries)
         secrets.append(secret)
         parts.append(ciphertext.astype("<u4").tobytes())
     answer = post(base, "/v1/rank", b"".join(parts))
@@ -223,11 +241,19 @@ def main():
             pages.append(page_of(doc))
         if len(pages) == manifest["pages"]:
             break
+    # Too few results still make a full set of requests, so the traffic keeps its shape.
+    for page in range(page_cols):
+        if len(pages) == manifest["pages"]:
+            break
+        if page not in pages:
+            pages.append(page)
+    while len(pages) < manifest["pages"]:
+        pages.append(page_cols - 1)
 
     # Step 7: fetch them, one encrypted unit vector per page.
     secrets, parts = [], []
     for page in pages:
-        secret, ciphertext = encrypt(page_A, 8, [(page, 1)], rng)
+        secret, ciphertext = encrypt(page_A, 8, [(page, 1)])
         secrets.append(secret)
         parts.append(ciphertext.astype("<u4").tobytes())
     answer = post(base, "/v1/fetch", b"".join(parts))

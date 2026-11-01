@@ -12,15 +12,19 @@
 //! sizes, whatever the query was and whatever came back, including when a page fails its
 //! integrity check. A server that answers wrongly on purpose therefore cannot learn anything
 //! from how the client reacts.
+//!
+//! `RankStage::decrypt` and `ScoredStage::choose` are separate so that a caller can time the
+//! first, whose work never varies, and use that to hide how long the second took. The time
+//! between an answer and the next request is the one thing here a server can measure.
+
+use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
-use unsaid_lwe::{LWE_DIM, Prepared, PublicMatrix, Secret};
+use unsaid_lwe::{Prepared, PublicMatrix, Secret};
 
+pub use crate::manifest::PAGE_DIGEST_BYTES;
 use crate::manifest::{Manifest, ManifestError};
 use crate::pages::{self, Document};
-
-/// Bytes kept from the SHA-256 of a page.
-pub const PAGE_DIGEST_BYTES: usize = 8;
 
 /// What can go wrong during a search.
 #[derive(Debug)]
@@ -101,6 +105,7 @@ pub struct IndexFiles<'a> {
 /// A verified index, ready to search.
 pub struct Index {
     manifest: Manifest,
+    id: String,
     mean: Vec<f32>,
     projection: Vec<f32>,
     prototypes: Vec<f32>,
@@ -151,6 +156,11 @@ pub struct RankStage {
     secrets: Vec<Secret>,
 }
 
+/// A search whose scores are decrypted, ready to choose its pages.
+pub struct ScoredStage {
+    ranked: Vec<(u32, i32)>,
+}
+
 /// A search waiting for its pages.
 pub struct FetchStage {
     ranked: Vec<(u32, i32)>,
@@ -171,11 +181,9 @@ impl Index {
         check_blob(&manifest, "payload_hint", files.payload_hint)?;
         let bad = |m: &str| SearchError::Index(m.to_owned());
 
+        // The manifest fixes the size of every file and each file has now been checked against
+        // it, so these lengths are known to be right and to fit in a usize.
         let (d, md, t) = (manifest.dim, manifest.model_dim, manifest.prototypes);
-        let expected_routing = (md + d * md + t * d) * 4 + t * 4;
-        if files.routing.len() != expected_routing {
-            return Err(bad("routing file has the wrong size"));
-        }
         let (float_part, owner_part) = files.routing.split_at((md + d * md + t * d) * 4);
         let all = floats(float_part);
         let owners = words(owner_part);
@@ -188,11 +196,7 @@ impl Index {
             return Err(bad("routing data contains a non-finite number"));
         }
 
-        let cols = manifest.payload.cols;
         let c = manifest.clusters;
-        if files.layout.len() != (c + cols) * 4 {
-            return Err(bad("layout file has the wrong size"));
-        }
         let layout = words(files.layout);
         let (sizes, page_first) = layout.split_at(c);
         let mut cluster_start = Vec::with_capacity(c + 1);
@@ -221,17 +225,8 @@ impl Index {
         {
             return Err(bad("page boundaries are not increasing"));
         }
-        if files.page_digests.len() != cols * PAGE_DIGEST_BYTES {
-            return Err(bad("page digest file has the wrong size"));
-        }
-        let hint_len = |rows: usize| rows * LWE_DIM * 4;
-        if files.rank_hint.len() != hint_len(manifest.rank.rows)
-            || files.payload_hint.len() != hint_len(manifest.payload.rows)
-        {
-            return Err(bad("a hint has the wrong size"));
-        }
-
         Ok(Self {
+            id: crate::manifest::index_id(manifest_json),
             rank_a: manifest.rank_matrix(),
             payload_a: manifest.payload_matrix(),
             mean: all[..md].to_vec(),
@@ -250,6 +245,11 @@ impl Index {
     /// The verified manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// The identifier of this index, which covers everything in it.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// The traffic shape the index recommends.
@@ -318,6 +318,11 @@ impl Index {
                 "tokens do not fit the ranking matrix".into(),
             ));
         }
+        if embedding.len() != m.model_dim {
+            return Err(SearchError::Index(
+                "the model's vectors do not fit this index".into(),
+            ));
+        }
         let projected = self.project(embedding);
         let plain: Vec<i32> = projected
             .iter()
@@ -358,10 +363,56 @@ impl Index {
     }
 }
 
+/// Marks a row that holds no document. Sorts after every real score.
+const PADDING: u32 = u32::MAX;
+
 impl RankStage {
     /// Clusters this search asked about. Known only to the client.
     pub fn clusters(&self) -> &[usize] {
         &self.clusters
+    }
+
+    /// Decrypt the scores. This does the same work for every search: every row of every answer,
+    /// including the padding of a smaller cluster, whose size the server chooses.
+    pub fn decrypt(self, index: &Index, answer: &[u8]) -> Result<ScoredStage, SearchError> {
+        let m = index.manifest();
+        let rows = m.rank.rows;
+        if answer.len() != self.secrets.len() * rows * 4 {
+            return Err(SearchError::Answer(format!(
+                "expected {} bytes, got {}",
+                self.secrets.len() * rows * 4,
+                answer.len()
+            )));
+        }
+        let answer = words(answer);
+        let mut ranked: Vec<(u32, i32)> = Vec::with_capacity(self.secrets.len() * rows);
+        let mut seen = Vec::with_capacity(self.clusters.len());
+        for ((secret, &cluster), part) in self
+            .secrets
+            .iter()
+            .zip(&self.clusters)
+            .zip(answer.chunks_exact(rows))
+        {
+            let scores = secret.open_signed(m.rank.log_p, part, &index.rank_hint);
+            let (start, end) = (
+                index.cluster_start[cluster],
+                index.cluster_start[cluster + 1],
+            );
+            let size = if seen.contains(&cluster) {
+                0
+            } else {
+                (end - start) as usize
+            };
+            seen.push(cluster);
+            ranked.extend(scores.iter().enumerate().map(|(row, &score)| {
+                if row < size {
+                    (start + row as u32, score)
+                } else {
+                    (PADDING, i32::MIN)
+                }
+            }));
+        }
+        Ok(ScoredStage { ranked })
     }
 
     /// Decrypt the scores, choose pages, and produce the bytes to send to `/v1/fetch`.
@@ -373,62 +424,39 @@ impl RankStage {
         tokens: Vec<Prepared>,
         limit: usize,
     ) -> Result<(FetchStage, Vec<u8>), SearchError> {
+        self.decrypt(index, answer)?.choose(index, tokens, limit)
+    }
+}
+
+impl ScoredStage {
+    /// Rank the documents, choose pages, and produce the bytes to send to `/v1/fetch`. Uses one
+    /// token per page. `limit` caps how many results are returned in the end.
+    pub fn choose(
+        mut self,
+        index: &Index,
+        tokens: Vec<Prepared>,
+        limit: usize,
+    ) -> Result<(FetchStage, Vec<u8>), SearchError> {
         let m = index.manifest();
         if tokens.is_empty() || tokens.iter().any(|t| t.len() != m.payload.cols) {
             return Err(SearchError::Tokens(
                 "tokens do not fit the document matrix".into(),
             ));
         }
-        let rows = m.rank.rows;
-        if answer.len() != self.secrets.len() * rows * 4 {
-            return Err(SearchError::Answer(format!(
-                "expected {} bytes, got {}",
-                self.secrets.len() * rows * 4,
-                answer.len()
-            )));
-        }
-        let answer = words(answer);
-        let mut ranked: Vec<(u32, i32)> = Vec::new();
-        let mut seen = Vec::with_capacity(self.clusters.len());
-        for ((secret, &cluster), part) in self
-            .secrets
-            .iter()
-            .zip(&self.clusters)
-            .zip(answer.chunks_exact(rows))
-        {
-            // Decrypt every row, including the padding of a smaller cluster. The next request
-            // leaves right after this, so the work must not depend on which cluster this was.
-            let scores = secret.open_signed(m.rank.log_p, part, &index.rank_hint);
-            if seen.contains(&cluster) {
-                continue;
-            }
-            seen.push(cluster);
-            let (start, end) = (
-                index.cluster_start[cluster],
-                index.cluster_start[cluster + 1],
-            );
-            let size = (end - start) as usize;
-            ranked.extend(
-                scores[..size]
-                    .iter()
-                    .enumerate()
-                    .map(|(row, &s)| (start + row as u32, s)),
-            );
-        }
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        self.ranked
+            .sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-        // Take pages in order of their best document, until the budget is used up.
+        // Take pages in order of their best document until the budget is used up, while looking
+        // at every entry, so that the time this takes does not depend on how soon that happens.
         let budget = tokens.len();
         let mut pages: Vec<usize> = Vec::with_capacity(budget);
-        for &(doc, _) in &ranked {
-            if pages.len() == budget {
-                break;
-            }
-            let page = index.page_of(doc);
-            if !pages.contains(&page) {
+        for &(doc, _) in &self.ranked {
+            let page = index.page_of(if doc == PADDING { 0 } else { doc });
+            if doc != PADDING && pages.len() < budget && !pages.contains(&page) {
                 pages.push(page);
             }
         }
+        self.ranked.retain(|&(doc, _)| doc != PADDING);
         // Too few results still produce a full set of fetches, so the shape stays fixed.
         let mut filler = 0;
         while pages.len() < budget {
@@ -447,7 +475,7 @@ impl RankStage {
         }
         Ok((
             FetchStage {
-                ranked,
+                ranked: self.ranked,
                 pages,
                 secrets,
                 limit,
@@ -475,7 +503,7 @@ impl FetchStage {
             )));
         }
         let answer = words(answer);
-        let mut documents: Vec<(u32, Document)> = Vec::new();
+        let mut documents: HashMap<u32, Document> = HashMap::new();
         let mut corrupted_pages = 0;
         let mut done: Vec<usize> = Vec::new();
         for ((secret, &page), part) in self
@@ -496,13 +524,10 @@ impl FetchStage {
                 continue;
             }
             let (first, end) = index.page_range(page);
-            match pages::decode(&bytes) {
-                Some(docs) if docs.len() == (end - first) as usize => {
-                    documents.extend(
-                        docs.into_iter()
-                            .enumerate()
-                            .map(|(i, d)| (first + i as u32, d)),
-                    );
+            let expected = (end - first) as usize;
+            match pages::decode(&bytes, expected) {
+                Some(docs) if docs.len() == expected => {
+                    documents.extend((first..).zip(docs));
                 }
                 _ => corrupted_pages += 1,
             }
@@ -512,11 +537,10 @@ impl FetchStage {
             .ranked
             .iter()
             .filter_map(|&(doc, score)| {
-                let found = documents.iter().position(|(id, _)| *id == doc)?;
                 Some(Hit {
                     doc,
                     score: score as f32 / scale,
-                    document: documents.swap_remove(found).1,
+                    document: documents.remove(&doc)?,
                 })
             })
             .take(self.limit)

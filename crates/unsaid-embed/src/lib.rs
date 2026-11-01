@@ -10,5 +10,8 @@ mod model;
 mod tokenizer;
 
 pub use bert::{Bert, Pooling};
-pub use model::{Embedder, ModelError, PackOptions, WeightFormat, pack_safetensors};
+pub use model::{
+    Embedder, KNOWN_MODELS, KnownModel, ModelError, PackOptions, WeightFormat, is_known_model,
+    pack_safetensors,
+};
 pub use tokenizer::Tokenizer;

@@ -42,11 +42,16 @@ Download a binary from [Releases](https://github.com/dharmeshdev1/unsaid/release
 cargo install --git https://github.com/dharmeshdev1/unsaid unsaid
 ```
 
-Then run the demo, which indexes 1,000 sample articles and opens a private search page:
+Then run the demo, which indexes 1,000 sample articles and serves a private search page. With `--watch`,
+the server prints each query as it arrives, so you can see for yourself how little there is in it:
 
-```sh
-unsaid demo
-# Private search at http://127.0.0.1:8377
+```text
+$ unsaid demo --watch
+Private search at http://127.0.0.1:8377
+Printing every query exactly as it arrives:
+
+127.0.0.1  POST /v1/rank       81920 bytes  e04b2a1c9f7d3385c16ea0b47d92f1e6...  answered in 2 ms
+127.0.0.1  POST /v1/fetch       2464 bytes  58c1fe3077a94dd2b6e0138f2ca96b45...  answered in 1 ms
 ```
 
 ## Search your own documents
