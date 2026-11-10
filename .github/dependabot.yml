@@ -8,6 +8,19 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Breaking upgrades of the randomness, hashing, compression and server crates change the
+      # cryptography or the wire format, so they are made by hand, with review. Patches still come.
+      - dependency-name: rand_core
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: rand_chacha
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: sha2
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: miniz_oxide
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: tower-http
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: docker
     directory: /
     schedule:
