@@ -21,7 +21,7 @@ getrandom.workspace = true
 getrandom = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
-rand_chacha = "0.3"
+rand_chacha = "0.10"
 rand_core = "0.6"
 
 [lints]
