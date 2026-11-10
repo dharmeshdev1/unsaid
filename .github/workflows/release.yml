@@ -37,6 +37,6 @@ jobs:
             tar -czf "$name.tar.gz" -C "$dir" unsaid -C "$GITHUB_WORKSPACE" LICENSE NOTICE README.md
             shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: unsaid-*
